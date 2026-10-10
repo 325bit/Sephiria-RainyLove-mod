@@ -35,6 +35,14 @@
       <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Mirror">
       <HintPath>$(GameDir)\Sephiria_Data\Managed\Mirror.dll</HintPath>
       <Private>false</Private>
@@ -44,5 +52,14 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <!-- -p:DeployMod=true 时，编译完自动把 dll 部署到游戏的 BepInEx/plugins/rainylove -->
+  <Target Name="DeployMod" AfterTargets="Build" Condition="'$(DeployMod)' == 'true'">
+    <ItemGroup>
+      <DeployFiles Include="$(TargetDir)$(AssemblyName).dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(GameDir)\BepInEx\plugins\rainylove" />
+    <Message Importance="high" Text="已部署：$(GameDir)\BepInEx\plugins\rainylove\$(AssemblyName).dll" />
+  </Target>
 
 </Project>

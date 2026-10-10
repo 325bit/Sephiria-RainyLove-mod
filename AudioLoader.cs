@@ -460,35 +460,48 @@ namespace RainyLove
         // 改成用 ffmpeg 把源文件解码成 WAV，交给 Windows 系统音频 API（winmm PlaySound）直接播放。
         private static string _lastCacheWav;
 
+        // 渲染结果缓存：参数（源文件 + 音量 + 淡入淡出）没变时复用上一次的临时 WAV，
+        // 避免在配置界面里反复点“测试播放”时把 40MB 的文件重复渲染一遍。
+        private static string _renderKey;
+        private static string _renderPath;
+
         /// <summary>准备一个可直接被系统音频播放的 WAV 文件路径：
         ///   入参 wavPath 即打包好的 rainylove.wav（由 Plugin.ResolveAudioPath 直接解析，不再依赖 mp3）。
-        ///   0) WAV 存在：默认音量(≈1.0)直接用它；否则用纯 C# 缩放其 PCM 采样成临时 WAV（无需 ffmpeg）。
-        ///   1) WAV 缺失但有同目录 mp3 且本机有 ffmpeg：ffmpeg 解码兜底（仅兼容老安装，非必需）。
+        ///   0) 音量≈1 且淡入淡出都为 0：直接播放原文件，不做任何拷贝。
+        ///   1) 否则：用纯 C#（无需 ffmpeg）把 16-bit PCM 采样按 volume 缩放，并在首尾施加
+        ///      fadeIn/fadeOut 淡入淡出包络，烘焙成临时 WAV 后播放。
+        ///   2) WAV 缺失但有同目录 mp3 且本机有 ffmpeg：ffmpeg 解码兜底（仅兼容老安装，非必需）。
         /// 返回 true 时 out outWav 为有效文件。</summary>
-        public static bool TryPrepareWav(string wavPath, float volume, out string outWav)
+        public static bool TryPrepareWav(string wavPath, float volume, float fadeInSeconds, float fadeOutSeconds, out string outWav)
         {
             outWav = null;
             if (string.IsNullOrEmpty(wavPath)) return false;
 
+            float vol = volume < 0f ? 0f : (volume > 1f ? 1f : volume);
+            float fadeIn = fadeInSeconds < 0f ? 0f : fadeInSeconds;
+            float fadeOut = fadeOutSeconds < 0f ? 0f : fadeOutSeconds;
+
             // 主路径：打包 WAV 直接存在，完全不碰 ffmpeg（便于 mod 分发，无需用户安装 ffmpeg）。
             if (File.Exists(wavPath))
             {
-                float vol = volume < 0f ? 0f : (volume > 1f ? 1f : volume);
-                if (vol >= 0.999f)
+                if (vol >= 0.999f && fadeIn <= 0.001f && fadeOut <= 0.001f)
                 {
                     outWav = wavPath;
-                    Plugin.Log.LogInfo("[rainylove] 使用打包 WAV（跳过 ffmpeg）：" + wavPath);
+                    Plugin.Log.LogInfo("[rainylove] 使用打包 WAV（无音量/淡入淡出处理）：" + wavPath);
                     return true;
                 }
-                // 音量被改过：用纯 C# 缩放打包 WAV 的 16-bit PCM 采样生成临时 WAV 播放（无需 ffmpeg）。
-                if (ScaleWavVolume(wavPath, vol, out outWav))
+
+                // 音量或淡入淡出被改过：纯 C# 渲染一份临时 WAV（无需 ffmpeg）。
+                if (RenderProcessedWav(wavPath, vol, fadeIn, fadeOut, out outWav))
                 {
-                    Plugin.Log.LogInfo("[rainylove] 已按音量 " + vol.ToString("F2", CultureInfo.InvariantCulture)
-                                       + " 缩放为临时 WAV：" + outWav);
+                    Plugin.Log.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                        "[rainylove] 已渲染临时 WAV：音量={0:F2}，淡入={1:F1}s，淡出={2:F1}s → {3}",
+                        vol, fadeIn, fadeOut, outWav));
                     return true;
                 }
-                // 缩放失败（非 16-bit PCM 等少见情况）：退而用全音量打包 WAV 并告警
-                Plugin.Log.LogWarning("[rainylove] 音量缩放失败，将直接播放打包的全音量 WAV：" + wavPath);
+
+                // 渲染失败（非 16-bit PCM 等少见情况）：退而用全音量打包 WAV 并告警
+                Plugin.Log.LogWarning("[rainylove] 音量/淡入淡出渲染失败，将直接播放打包的全音量 WAV：" + wavPath);
                 outWav = wavPath;
                 return true;
             }
@@ -499,21 +512,39 @@ namespace RainyLove
             if (File.Exists(mp3Sibling) && HasFfmpeg())
             {
                 Plugin.Log.LogInfo("[rainylove] 未找到打包 WAV，使用 ffmpeg 解码同目录 mp3 兜底。");
-                return TryFfmpegToWav(mp3Sibling, volume, out outWav);
+                string decoded;
+                if (!TryFfmpegDecodeToWav(mp3Sibling, out decoded)) return false;
+
+                string mixed;
+                if (RenderProcessedWav(decoded, vol, fadeIn, fadeOut, out mixed)) { outWav = mixed; return true; }
+                outWav = decoded;
+                return true;
             }
 
             Plugin.Log.LogWarning("[rainylove] 找不到音频文件（需要 rainylove.wav）：" + wavPath);
             return false;
         }
 
-        /// <summary>把 srcWav 的 16-bit PCM 采样整体乘以 vol(0~1) 后写入临时 WAV，返回临时文件路径。
-        /// 纯 C# 实现，不依赖 ffmpeg。仅支持标准 PCM（format=1, 16bit），其它格式返回 false 交由调用方回退。
-        /// 这样即便用户机器上没有 ffmpeg，改 Volume 配置也能真正生效，且打包 WAV 仍可随 mod 分发。</summary>
-        private static bool ScaleWavVolume(string srcWav, float vol, out string outWav)
+        /// <summary>把 srcWav 的 16-bit PCM 采样按 vol(0~1) 缩放，并在首尾分别施加 fadeInSec / fadeOutSec
+        /// 的线性淡入淡出包络，结果写入临时 WAV 后返回其路径。纯 C# 实现，不依赖 ffmpeg。
+        /// 仅支持标准 PCM（format=1, 16bit），其它格式返回 false 交由调用方回退。
+        /// 结果按 (源文件 + 参数) 缓存，参数不变时直接复用上一次的临时文件。
+        /// 这样即便用户机器上没有 ffmpeg，音量与淡入淡出也能真正生效，且打包 WAV 仍可随 mod 分发。</summary>
+        private static bool RenderProcessedWav(string srcWav, float vol, float fadeInSec, float fadeOutSec, out string outWav)
         {
             outWav = null;
             try
             {
+                string key = srcWav
+                             + "|" + vol.ToString("F3", CultureInfo.InvariantCulture)
+                             + "|" + fadeInSec.ToString("F2", CultureInfo.InvariantCulture)
+                             + "|" + fadeOutSec.ToString("F2", CultureInfo.InvariantCulture);
+                if (_renderKey == key && _renderPath != null && File.Exists(_renderPath))
+                {
+                    outWav = _renderPath;
+                    return true;
+                }
+
                 byte[] data = File.ReadAllBytes(srcWav);
                 // 校验 RIFF/WAVE
                 if (data.Length < 12
@@ -536,60 +567,86 @@ namespace RainyLove
                 if (fmtBody < 0 || dataBody < 0) return false;
 
                 short formatTag = BitConverter.ToInt16(data, fmtBody);
+                short channels = BitConverter.ToInt16(data, fmtBody + 2);
+                int sampleRate = BitConverter.ToInt32(data, fmtBody + 4);
                 short bits = BitConverter.ToInt16(data, fmtBody + 14);
-                if (formatTag != 1 || bits != 16)
+                if (formatTag != 1 || bits != 16 || channels <= 0)
                 {
-                    Plugin.Log.LogWarning("[rainylove] 音量缩放：仅支持 16-bit PCM WAV，当前格式不支持，回退全音量。");
+                    Plugin.Log.LogWarning("[rainylove] 音量/淡入淡出处理：仅支持 16-bit PCM WAV，当前格式不支持，回退原文件。");
                     return false;
                 }
 
-                // 复制整个文件，仅缩放 data 段的 16-bit 样本
-                byte[] outBuf = (byte[])data.Clone();
+                int frameBytes = channels * 2;
                 int end = dataBody + dataLen;
-                if (end > outBuf.Length) end = outBuf.Length;
-                for (int i = dataBody; i + 1 < end; i += 2)
+                if (end > data.Length) end = data.Length;
+                long totalFrames = (end - dataBody) / frameBytes;
+                if (totalFrames <= 0) return false;
+
+                // 淡入 / 淡出各占多少帧（不超过总长）
+                int fadeInFrames = (int)Math.Min(totalFrames, Math.Round(fadeInSec * sampleRate));
+                int fadeOutFrames = (int)Math.Min(totalFrames, Math.Round(fadeOutSec * sampleRate));
+
+                // 复制整个文件，仅改写 data 段的 16-bit 样本
+                byte[] outBuf = (byte[])data.Clone();
+                for (long frame = 0; frame < totalFrames; frame++)
                 {
-                    int s = BitConverter.ToInt16(outBuf, i);
-                    int v = (int)(s * vol);
-                    if (v > 32767) v = 32767;
-                    else if (v < -32768) v = -32768;
-                    outBuf[i] = (byte)(v & 0xFF);
-                    outBuf[i + 1] = (byte)((v >> 8) & 0xFF);
+                    float gain = vol;
+                    if (fadeInFrames > 0 && frame < fadeInFrames)
+                        gain *= (frame + 1f) / fadeInFrames;          // 0 → vol 线性淡入
+                    long framesFromEnd = totalFrames - 1 - frame;
+                    if (fadeOutFrames > 0 && framesFromEnd < fadeOutFrames)
+                        gain *= (framesFromEnd + 1f) / fadeOutFrames; // vol → 0 线性淡出
+
+                    int baseIndex = dataBody + (int)(frame * frameBytes);
+                    for (int c = 0; c < channels; c++)
+                    {
+                        int i = baseIndex + c * 2;
+                        if (i + 1 >= end) break;
+                        int s = (short)(outBuf[i] | (outBuf[i + 1] << 8));
+                        int v = (int)(s * gain);
+                        if (v > 32767) v = 32767;
+                        else if (v < -32768) v = -32768;
+                        outBuf[i] = (byte)(v & 0xFF);
+                        outBuf[i + 1] = (byte)((v >> 8) & 0xFF);
+                    }
                 }
 
-                if (_lastCacheWav != null)
-                {
-                    try { if (File.Exists(_lastCacheWav)) File.Delete(_lastCacheWav); } catch { /* 占用中，跳过 */ }
-                }
-                string tmp = Path.Combine(Path.GetTempPath(), "rainylove_vol_" + Guid.NewGuid().ToString("N") + ".wav");
+                DeleteCacheFile(_lastCacheWav);
+                string tmp = Path.Combine(Path.GetTempPath(), "rainylove_mix_" + Guid.NewGuid().ToString("N") + ".wav");
                 File.WriteAllBytes(tmp, outBuf);
                 _lastCacheWav = tmp;
+                _renderKey = key;
+                _renderPath = tmp;
                 outWav = tmp;
                 return true;
             }
             catch (Exception e)
             {
-                Plugin.Log.LogWarning("[rainylove] 音量缩放异常：" + e.GetType().Name + " - " + e.Message);
+                Plugin.Log.LogWarning("[rainylove] 音量/淡入淡出渲染异常：" + e.GetType().Name + " - " + e.Message);
                 return false;
             }
         }
 
-        /// <summary>用 ffmpeg 把 mp3 解码（按 vol 调音量）为临时 WAV 缓存；失败返回 false。</summary>
-        private static bool TryFfmpegToWav(string mp3Path, float vol, out string wavPath)
+        /// <summary>删除上一份临时 WAV。正被 PlaySound 占用时删除会失败，Windows 会在句柄释放后回收，忽略即可。
+        /// 只在“即将写出新文件”前调用，所以这里一定是被淘汰的旧文件，可以放心删。</summary>
+        private static void DeleteCacheFile(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* 占用中，跳过 */ }
+        }
+
+        /// <summary>用 ffmpeg 把 mp3 解码成 16-bit PCM 的临时 WAV（全音量、无淡入淡出，后处理交给
+        /// RenderProcessedWav 统一做）；失败返回 false。</summary>
+        private static bool TryFfmpegDecodeToWav(string mp3Path, out string wavPath)
         {
             wavPath = null;
             string ffmpeg = ResolveFfmpegPath();
             if (string.IsNullOrEmpty(ffmpeg)) return false;
 
             // 删除上一次缓存（若正被 PlaySound 占用则忽略错误，Windows 会延后删除）
-            if (_lastCacheWav != null)
-            {
-                try { if (File.Exists(_lastCacheWav)) File.Delete(_lastCacheWav); } catch { /* 占用中，跳过 */ }
-            }
+            DeleteCacheFile(_lastCacheWav);
             string cache = Path.Combine(Path.GetTempPath(), "rainylove_cache_" + Guid.NewGuid().ToString("N") + ".wav");
             _lastCacheWav = cache;
-
-            string volArg = vol >= 0.999f ? "" : string.Format(CultureInfo.InvariantCulture, " -af volume={0:F2}", vol);
 
             var psi = new ProcessStartInfo(ffmpeg)
             {
@@ -597,8 +654,8 @@ namespace RainyLove
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 Arguments = string.Format(CultureInfo.InvariantCulture,
-                    "-hide_banner -loglevel error -y -i \"{0}\" -map 0:a:0 -acodec pcm_s16le -ar 44100 -ac 2{1} \"{2}\"",
-                    mp3Path, volArg, cache)
+                    "-hide_banner -loglevel error -y -i \"{0}\" -map 0:a:0 -acodec pcm_s16le -ar 44100 -ac 2 \"{1}\"",
+                    mp3Path, cache)
             };
             try
             {
@@ -756,6 +813,55 @@ namespace RainyLove
             catch { /* ignore */ }
 
             return string.Empty;
+        }
+
+        /// <summary>读取 WAV 时长（秒）。仅支持标准 PCM（format=1, 16bit）。失败返回 0。
+        /// 用于测试播放自然结束后自动复位状态——winmm 的 PlaySound 异步播放不回调结束事件。</summary>
+        public static float GetWavDuration(string wavPath)
+        {
+            try
+            {
+                using (var fs = File.OpenRead(wavPath))
+                {
+                    byte[] buf = new byte[8192];
+                    int read = fs.Read(buf, 0, buf.Length);
+                    if (read < 12 || BitConverter.ToUInt32(buf, 0) != 0x46464952u) return 0f; // RIFF
+
+                    int pos = 12;
+                    int sampleRate = 0, channels = 0, bits = 0, dataSize = -1;
+                    while (pos + 8 <= read)
+                    {
+                        uint id = BitConverter.ToUInt32(buf, pos);
+                        int size = BitConverter.ToInt32(buf, pos + 4);
+                        int body = pos + 8;
+                        if (id == 0x20746D66u) // "fmt "
+                        {
+                            if (body + 16 <= read)
+                            {
+                                channels = BitConverter.ToInt16(buf, body + 2);
+                                sampleRate = BitConverter.ToInt32(buf, body + 4);
+                                bits = BitConverter.ToInt16(buf, body + 14);
+                            }
+                        }
+                        else if (id == 0x61746164u) // "data"
+                        {
+                            dataSize = size;
+                            break;
+                        }
+                        if (size < 0) break;
+                        pos = body + size + (size & 1);
+                    }
+
+                    if (dataSize < 0 || sampleRate <= 0 || channels <= 0 || bits <= 0) return 0f;
+                    int bytesPerSec = sampleRate * channels * (bits / 8);
+                    if (bytesPerSec <= 0) return 0f;
+                    return (float)dataSize / bytesPerSec;
+                }
+            }
+            catch
+            {
+                return 0f;
+            }
         }
 
         private static bool TryDecodeWithFfmpeg(string path, int resampleHz, out float[] pcm, out int channels, out int sampleRate)

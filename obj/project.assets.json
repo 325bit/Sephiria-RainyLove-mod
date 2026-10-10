@@ -14,11 +14,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\workplace\\Sephiria\\mods\\rainylove\\rainylove.csproj",
+      "projectUniqueName": "D:\\workplace\\Sephiria\\mods\\rainylove-bp5\\rainylove.csproj",
       "projectName": "RainyLove",
-      "projectPath": "D:\\workplace\\Sephiria\\mods\\rainylove\\rainylove.csproj",
+      "projectPath": "D:\\workplace\\Sephiria\\mods\\rainylove-bp5\\rainylove.csproj",
       "packagesPath": "C:\\Users\\Passacaglia\\.nuget\\packages\\",
-      "outputPath": "D:\\workplace\\Sephiria\\mods\\rainylove\\obj\\",
+      "outputPath": "D:\\workplace\\Sephiria\\mods\\rainylove-bp5\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
