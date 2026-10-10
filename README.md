@@ -22,7 +22,7 @@
 ### AIZO（血量过低）
 检测**自身玩家**（`authority` 标记）的血量：
 
-- 当前血量百分比 `< AizoHealthPercent`（0~99%）**或** 当前血量固定值 `< AizoHealthValue`（0~9999）时播放 `AIZO.wav`。
+- 当前血量百分比 `< AizoHealthPercent`（0~99%）**或** 当前血量固定值 `< AizoHealthValue`（0~100）时播放 `AIZO.wav`。
 - 两个阈值都为 0 时视为“关闭该条件”（永远不满足）。
 - 血量恢复高于阈值后停止（并允许下一轮再次触发）。
 - 血量字段名在不同构建里不确定，插件用反射按候选名探测 `PlayerAvatar` 的 current / max / 直接百分比字段，
@@ -45,7 +45,7 @@
 | 控件 | 作用 |
 |---|---|
 | 播放音量 | 0~100%，等价于 `Volume` |
-| 淡出时长 | 0~10 秒，播放结尾由设定音量线性降到静音（**已移除淡入**） |
+| 淡出时长 | 0~300 秒，播放结尾由设定音量线性降到静音（**已移除淡入**） |
 | ▶ 测试播放 | 不看存活判定，直接播放（只受停止按钮控制） |
 | ■ 停止播放 | 立即中断当前 RainyLove 播放 |
 | 完成 / × | 关闭面板并把配置写入 `.cfg` |
@@ -54,9 +54,9 @@
 | 控件 | 作用 |
 |---|---|
 | 播放音量 | 0~100%，等价于 `AizoVolume` |
-| 淡出时长 | 0~10 秒（0 表示不淡出），等价于 `AizoFadeOutSeconds` |
+| 淡出时长 | 0~300 秒（0 表示不淡出），等价于 `AizoFadeOutSeconds` |
 | 开始播放的血量阈值（%） | 0~99%，等价于 `AizoHealthPercent` |
-| 开始播放的血量固定值 | 0~9999，等价于 `AizoHealthValue` |
+| 开始播放的血量固定值 | 0~100，等价于 `AizoHealthValue` |
 | ▶ 音频播放测试 | 直接播放 AIZO（只受停止按钮控制） |
 | ■ 音频播放停止 | 立即中断当前 AIZO 播放 |
 
@@ -189,14 +189,14 @@ mod 播放的是 WAV，不依赖 mp3（mp3 仅作为老安装、且本机装有 
 | `AudioFilePath` | 空 | RainyLove 音频目录或文件路径，留空用默认位置 |
 | `ScanIntervalSec` | 0.25 | 存活人数扫描间隔（秒） |
 | `OnlyWhenSelfIsLast` | false | 仅当自己就是最后存活者才播放 |
-| `FadeOutSeconds` | 2 | RainyLove 播放结尾淡出时长（秒），0 表示不淡出 |
+| `FadeOutSeconds` | 2 | RainyLove 播放结尾淡出时长（秒），0~300，0 表示不淡出 |
 | `ResampleHz` | 44100 | 解码采样率；44100 约 70MB 内存，22050 约减半 |
 | `AizoEnabled` | true | AIZO 总开关 |
 | `AizoVolume` | 0.4 | AIZO 播放音量 0~1 |
 | `AizoAudioFilePath` | 空 | AIZO 音频目录或文件路径，留空用默认位置 |
-| `AizoFadeOutSeconds` | 2 | AIZO 播放结尾淡出时长（秒），0 表示不淡出 |
+| `AizoFadeOutSeconds` | 2 | AIZO 播放结尾淡出时长（秒），0~300，0 表示不淡出 |
 | `AizoHealthPercent` | 30 | AIZO 触发阈值：自身血量百分比低于该值(0~99%) |
-| `AizoHealthValue` | 30 | AIZO 触发阈值：自身血量低于该固定值(0~9999) |
+| `AizoHealthValue` | 30 | AIZO 触发阈值：自身血量低于该固定值(0~100) |
 | `AudioPriority` | RainyLoveFirst | 音频播放优先级：RainyLoveFirst / AizoFirst / FirstCome |
 | `MenuKey` | f7 | 呼出 / 关闭配置界面的按键 |
 

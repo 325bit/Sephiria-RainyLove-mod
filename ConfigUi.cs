@@ -207,7 +207,7 @@ namespace RainyLove
                 Plugin.Volume.Value, 0f, 1f, 0.05f, v => Plugin.Volume.Value = Mathf.Round(v * 100f) / 100f);
 
             SliderRow(186f, 212f, "淡出时长（秒）", Seconds(Plugin.FadeOutSeconds.Value),
-                Plugin.FadeOutSeconds.Value, 0f, 10f, 0.5f, v => Plugin.FadeOutSeconds.Value = Mathf.Round(v * 10f) / 10f);
+                Plugin.FadeOutSeconds.Value, 0f, 300f, 1f, v => Plugin.FadeOutSeconds.Value = Mathf.Round(v));
 
             Fill(new Rect(24f, 256f, WindowWidth - 48f, 1f), UiBorder);
 
@@ -234,13 +234,13 @@ namespace RainyLove
                 Plugin.AizoVolume.Value, 0f, 1f, 0.05f, v => Plugin.AizoVolume.Value = Mathf.Round(v * 100f) / 100f);
 
             SliderRow(180f, 206f, "淡出时长（秒）", Seconds(Plugin.AizoFadeOutSeconds.Value),
-                Plugin.AizoFadeOutSeconds.Value, 0f, 10f, 0.5f, v => Plugin.AizoFadeOutSeconds.Value = Mathf.Round(v * 10f) / 10f);
+                Plugin.AizoFadeOutSeconds.Value, 0f, 300f, 1f, v => Plugin.AizoFadeOutSeconds.Value = Mathf.Round(v));
 
             SliderRow(242f, 268f, "开始播放的血量阈值（%）", Mathf.RoundToInt(Plugin.AizoHealthPercent.Value) + "%",
                 Plugin.AizoHealthPercent.Value, 0f, 99f, 1f, v => Plugin.AizoHealthPercent.Value = Mathf.Round(v));
 
             SliderRow(304f, 330f, "开始播放的血量固定值", Mathf.RoundToInt(Plugin.AizoHealthValue.Value).ToString(),
-                Plugin.AizoHealthValue.Value, 0f, 9999f, 1f, v => Plugin.AizoHealthValue.Value = Mathf.Round(v));
+                Plugin.AizoHealthValue.Value, 0f, 100f, 1f, v => Plugin.AizoHealthValue.Value = Mathf.Round(v));
 
             Fill(new Rect(24f, 372f, WindowWidth - 48f, 1f), UiBorder);
 

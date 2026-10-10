@@ -53,7 +53,7 @@ namespace RainyLove
             OnlyWhenSelfIsLast = Config.Bind("General", "OnlyWhenSelfIsLast", false,
                 "仅当自己就是最后存活的玩家时才播放（关闭时任何客户端检测到剩 1 人都会播放）");
             FadeOutSeconds = Config.Bind("Audio", "FadeOutSeconds", 2f,
-                new ConfigDescription("RainyLove 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 10f)));
+                new ConfigDescription("RainyLove 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 300f)));
             ResampleHz = Config.Bind("Audio", "ResampleHz", 44100,
                 "解码采样率（仅 ffmpeg 兜底用）。44100 音质最好但内存占用大；22050 可减半");
 
@@ -64,11 +64,11 @@ namespace RainyLove
             AizoAudioFilePath = Config.Bind("AIZO", "AudioFilePath", "",
                 "音频文件（AIZO.wav）所在目录或文件路径。留空时按默认位置查找");
             AizoFadeOutSeconds = Config.Bind("AIZO", "FadeOutSeconds", 2f,
-                new ConfigDescription("AIZO 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 10f)));
+                new ConfigDescription("AIZO 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 300f)));
             AizoHealthPercent = Config.Bind("AIZO", "HealthPercent", 30f,
                 new ConfigDescription("当自身血量百分比低于该值(0~99%)时播放", new AcceptableValueRange<float>(0f, 99f)));
             AizoHealthValue = Config.Bind("AIZO", "HealthValue", 30f,
-                new ConfigDescription("当自身血量低于该固定值(0~9999)时播放", new AcceptableValueRange<float>(0f, 9999f)));
+                new ConfigDescription("当自身血量低于该固定值(0~100)时播放", new AcceptableValueRange<float>(0f, 100f)));
 
             // ---- 主设置 ----
             AudioPriority = Config.Bind("主设置", "AudioPriority", RainyLove.AudioPriority.RainyLoveFirst,
