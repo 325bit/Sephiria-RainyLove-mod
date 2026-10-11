@@ -233,31 +233,28 @@ namespace RainyLove
             SliderRow(118f, 144f, "播放音量", Percent(Plugin.AizoVolume.Value),
                 Plugin.AizoVolume.Value, 0f, 1f, 0.05f, v => Plugin.AizoVolume.Value = Mathf.Round(v * 100f) / 100f);
 
-            SliderRow(180f, 206f, "淡出时长（秒）", Seconds(Plugin.AizoFadeOutSeconds.Value),
-                Plugin.AizoFadeOutSeconds.Value, 0f, 300f, 1f, v => Plugin.AizoFadeOutSeconds.Value = Mathf.Round(v));
-
-            SliderRow(242f, 268f, "开始播放的血量阈值（%）", Mathf.RoundToInt(Plugin.AizoHealthPercent.Value) + "%",
+            SliderRow(180f, 206f, "开始播放的血量阈值（%）", Mathf.RoundToInt(Plugin.AizoHealthPercent.Value) + "%",
                 Plugin.AizoHealthPercent.Value, 0f, 99f, 1f, v => Plugin.AizoHealthPercent.Value = Mathf.Round(v));
 
-            SliderRow(304f, 330f, "开始播放的血量固定值", Mathf.RoundToInt(Plugin.AizoHealthValue.Value).ToString(),
+            SliderRow(242f, 268f, "开始播放的血量固定值", Mathf.RoundToInt(Plugin.AizoHealthValue.Value).ToString(),
                 Plugin.AizoHealthValue.Value, 0f, 100f, 1f, v => Plugin.AizoHealthValue.Value = Mathf.Round(v));
 
-            Fill(new Rect(24f, 372f, WindowWidth - 48f, 1f), UiBorder);
+            GUI.Label(new Rect(24f, 308f, WindowWidth - 48f, 22f),
+                "当血量回升到阈值以上时在节点处自动停止播放", _small);
+
+            Fill(new Rect(24f, 340f, WindowWidth - 48f, 1f), UiBorder);
 
             AizoWatcher aizo = Plugin.Aizo;
-            DrawStatus(398f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
+            DrawStatus(366f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
 
             bool aizoOn = Plugin.AizoEnabled.Value;
             bool disabled = !aizoOn;
             GUI.enabled = !disabled;
-            if (Button(new Rect(24f, 426f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
-            if (Button(new Rect(186f, 426f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
+            if (Button(new Rect(24f, 404f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
+            if (Button(new Rect(186f, 404f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 426f, 120f, 36f), "完成", true)) SetVisible(false);
-
-            GUI.Label(new Rect(24f, 462f, WindowWidth - 48f, 24f),
-                "自身血量低于阈值(%) 或 低于固定值 时播放；两项都设为 0 则该条件关闭。", _small);
+            if (Button(new Rect(WindowWidth - 144f, 404f, 120f, 36f), "完成", true)) SetVisible(false);
         }
 
         // ---- 主设置子页 ----

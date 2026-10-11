@@ -11,11 +11,25 @@ namespace RainyLove
     /// 两个阈值都为 0 时视为“关闭该条件”（永远不满足）。
     /// 播放同样经过 AudioChannel 仲裁；配置界面的“音频播放测试 / 音频播放停止”走手动通道。
     ///
+    /// 停止策略（节点顺延，不使用淡出）：
+    /// AIZO 的时间轴被切成几个“节点”，血量回升需要停播时不立即停，而是向后顺延到最近的下一个节点：
+    ///     p1 = 00:00（开始） / p2 = 00:43.5 / p3 = 01:38 / p4 = 02:20 / p5 = 曲末
+    /// 例如播放到 01:00 时回满血 → 放到 01:38（p3）再停。
+    /// 若在目标节点前 NodeWindowSec(10s) 内血量又跌破任一阈值 → 再顺延到下一个节点；
+    /// 已经顺延到 p4(02:20) 还在窗口内触发 → 放完整首（p5）。
+    ///
     /// 血量字段名在不同构建里不确定，这里用反射按候选名探测 PlayerAvatar 的 current / max / 直接百分比字段，
     /// 缓存 MemberInfo 并打日志，便于确认是否取对。
     /// </summary>
     public class AizoWatcher : MonoBehaviour
     {
+        // ===== 时间轴节点（秒）=====
+        // 索引 0 = p2 00:43.5，1 = p3 01:38，2 = p4 02:20；索引 EndNode(3) = p5 曲末
+        private static readonly float[] Checkpoints = { 43.5f, 98f, 140f };
+        private static readonly string[] NodeLabels = { "p2 00:43.5", "p3 01:38", "p4 02:20", "p5 曲末" };
+        private const int EndNode = 3;              // 虚拟节点：曲末（放完整首）
+        private const float NodeWindowSec = 10f;    // 距目标节点前多少秒内再次满足阈值→顺延
+
         private float _scanTimer;
         private string _wavPath;
         private bool _audioReady;
@@ -23,6 +37,13 @@ namespace RainyLove
         private bool _playAfterLoad;
         private bool _manualAfterLoad;
         private bool _triggered;       // 本次“低血量”区间已触发过，避免重复触发
+        private float _duration;       // 当前渲染出来的 WAV 时长（秒）
+
+        // ===== 节点顺延状态 =====
+        private int _stopNode = -1;    // 计划停止的节点索引；-1 = 暂无停止计划
+        private bool _targetLocked;    // 目标由“窗口内顺延”产生，不允许再被取消
+        private bool _playToEnd;       // 已决定放完整首，不再安排任何停止
+        private bool _lastLow;         // 最近一次扫描到的“血量低于阈值”结果
 
         public bool IsPlaying => AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.Aizo);
         public bool IsAudioReady => _audioReady;
@@ -48,13 +69,15 @@ namespace RainyLove
                 yield break;
             }
 
-            // AIZO 仅音量 + 淡出（无淡入）。
+            // AIZO 只做音量缩放：淡入淡出已取消，停止改由“时间轴节点”控制。
             string wavPath;
-            if (AudioLoader.TryPrepareWav(path, Plugin.AizoVolume.Value, 0f, Plugin.AizoFadeOutSeconds.Value, out wavPath))
+            if (AudioLoader.TryPrepareWav(path, Plugin.AizoVolume.Value, 0f, 0f, out wavPath))
             {
                 _wavPath = wavPath;
+                _duration = AudioLoader.GetWavDuration(wavPath);
                 _audioReady = true;
-                Plugin.Log.LogInfo("[rainylove][AIZO] 音频就绪（系统播放）：" + wavPath);
+                Plugin.Log.LogInfo("[rainylove][AIZO] 音频就绪（系统播放）：" + wavPath
+                                   + "，时长 " + Fmt(_duration));
             }
             else
             {
@@ -69,6 +92,7 @@ namespace RainyLove
                 _manualAfterLoad = false;
                 if (_audioReady)
                 {
+                    ResetSchedule();
                     if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _wavPath);
                     else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _wavPath)) _triggered = true;
                 }
@@ -79,9 +103,13 @@ namespace RainyLove
         {
             if (!Plugin.AizoEnabled.Value)
             {
+                ResetSchedule();
                 AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);   // 关闭只停自动，手动测试不受影响
                 return;
             }
+
+            // “到节点就停”每帧检查，避免 0.25s 扫描间隔带来的过冲。
+            TickScheduledStop();
 
             _scanTimer += Time.unscaledDeltaTime;
             if (_scanTimer >= Plugin.ScanInterval.Value)
@@ -93,6 +121,7 @@ namespace RainyLove
 
         private void OnDestroy()
         {
+            ResetSchedule();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);
             AudioChannel.Instance?.StopManual(AudioSourceKey.Aizo);
         }
@@ -107,17 +136,156 @@ namespace RainyLove
 
             bool low = (pct * 100f) < Plugin.AizoHealthPercent.Value
                        || cur < Plugin.AizoHealthValue.Value;
+            _lastLow = low;
+
+            AudioChannel ch = AudioChannel.Instance;
+            bool autoPlaying = ch != null && ch.IsPlaying(AudioSourceKey.Aizo)
+                               && !ch.IsManualPlaying(AudioSourceKey.Aizo);
+
+            if (!autoPlaying)
+            {
+                // 没在自动播放：走“要不要起播”的常规判定，并清空节点计划。
+                ResetSchedule();
+                if (low)
+                {
+                    if (!_triggered && AutoPlay()) _triggered = true;
+                }
+                else
+                {
+                    _triggered = false;
+                }
+                return;
+            }
+
+            float elapsed = ch.GetElapsedSeconds(AudioSourceKey.Aizo);
+            if (elapsed < 0f) { ResetSchedule(); return; }
+            if (_duration <= 0f) _duration = ch.GetDuration(AudioSourceKey.Aizo);
 
             if (low)
             {
-                if (!_triggered && AutoPlay()) _triggered = true;
+                // 播放途中血量又跌破阈值
+                if (_stopNode < 0) return;                     // 本来就打算放到底，不用管
+
+                float target = NodeTime(_stopNode);
+                if (elapsed >= target - NodeWindowSec)
+                {
+                    // 落在目标节点前 10 秒窗口内 → 顺延到下一个节点
+                    int from = _stopNode;
+                    AdvanceNode();
+                    _targetLocked = true;
+                    Plugin.Log.LogMessage("[rainylove][AIZO] " + Fmt(elapsed) + " 血量再次低于阈值，"
+                        + "（" + NodeLabels[from] + " 前 10 秒内）顺延到 "
+                        + (_playToEnd ? "曲末（放完整首）" : NodeLabels[_stopNode]) + "。");
+                }
+                else if (!_targetLocked)
+                {
+                    // 离目标节点还远就跌破阈值 → 取消这次停止计划，继续正常播放
+                    _stopNode = -1;
+                    Plugin.Log.LogMessage("[rainylove][AIZO] " + Fmt(elapsed) + " 血量再次低于阈值，"
+                        + "取消原定于 " + NodeLabels[IndexOfElapsed(target)] + " 的停止，继续播放。");
+                }
             }
             else
             {
-                // 血量恢复：复位触发标记，并停止正在播放的自动声音（手动测试不受影响）。
-                _triggered = false;
-                AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);
+                // 血量回升：本来要停，但改为顺延到最近的下一个节点再停
+                if (_playToEnd || _stopNode >= 0) return;
+
+                int node = NextNodeIndex(elapsed);
+                if (node >= EndNode)
+                {
+                    _playToEnd = true;
+                    Plugin.Log.LogMessage("[rainylove][AIZO] " + Fmt(elapsed) + " 血量回升，"
+                        + "已过最后一个节点（02:20），放完整首音频。");
+                }
+                else
+                {
+                    _stopNode = node;
+                    _targetLocked = false;
+                    Plugin.Log.LogMessage("[rainylove][AIZO] " + Fmt(elapsed) + " 血量回升，"
+                        + "顺延至 " + NodeLabels[node] + " 结束播放。");
+                }
             }
+        }
+
+        /// <summary>每帧检查：已播到计划的节点就停（无淡出，直接停）。</summary>
+        private void TickScheduledStop()
+        {
+            if (_stopNode < 0) return;
+
+            AudioChannel ch = AudioChannel.Instance;
+            if (ch == null) return;
+            if (!ch.IsPlaying(AudioSourceKey.Aizo) || ch.IsManualPlaying(AudioSourceKey.Aizo)) return;
+
+            float elapsed = ch.GetElapsedSeconds(AudioSourceKey.Aizo);
+            if (elapsed < 0f) { ResetSchedule(); return; }
+            if (elapsed < NodeTime(_stopNode)) return;
+
+            if (_lastLow)
+            {
+                // 刚好到节点时血量又低了：不硬停，继续放着（否则会立刻从头重播）
+                Plugin.Log.LogMessage("[rainylove][AIZO] 到达 " + NodeLabels[_stopNode]
+                    + " 时血量再次低于阈值，取消本次停止，继续播放。");
+                _stopNode = -1;
+                _targetLocked = false;
+                return;
+            }
+
+            ch.StopAuto(AudioSourceKey.Aizo);
+            Plugin.Log.LogMessage("[rainylove][AIZO] 已在节点 " + NodeLabels[_stopNode]
+                + "（" + Fmt(NodeTime(_stopNode)) + "）结束播放。");
+            ResetSchedule();
+            _triggered = false;
+        }
+
+        // ===================== 节点时间轴 =====================
+
+        /// <summary>节点索引对应的播放位置（秒）；EndNode 为曲末。</summary>
+        private float NodeTime(int index)
+        {
+            if (index < 0) return -1f;
+            if (index < Checkpoints.Length) return Checkpoints[index];
+            return _duration > 0f ? _duration : Checkpoints[Checkpoints.Length - 1];
+        }
+
+        /// <summary>严格晚于 elapsed 的最近节点；没有就返回 EndNode（放完整首）。</summary>
+        private int NextNodeIndex(float elapsed)
+        {
+            for (int i = 0; i < Checkpoints.Length; i++)
+            {
+                float c = Checkpoints[i];
+                if (c > elapsed + 0.01f && (_duration <= 0f || c < _duration - 1f)) return i;
+            }
+            return EndNode;
+        }
+
+        private void AdvanceNode()
+        {
+            int next = _stopNode + 1;
+            if (next >= EndNode) { _playToEnd = true; _stopNode = -1; }
+            else _stopNode = next;
+        }
+
+        private int IndexOfElapsed(float t)
+        {
+            for (int i = 0; i < Checkpoints.Length; i++)
+                if (Mathf.Approximately(Checkpoints[i], t)) return i;
+            return Checkpoints.Length - 1;
+        }
+
+        /// <summary>清空一次播放的节点顺延计划。</summary>
+        private void ResetSchedule()
+        {
+            _stopNode = -1;
+            _targetLocked = false;
+            _playToEnd = false;
+            _lastLow = false;
+        }
+
+        private static string Fmt(float seconds)
+        {
+            if (seconds < 0f) seconds = 0f;
+            int s = Mathf.FloorToInt(seconds);
+            return (s / 60).ToString("00") + ":" + (s % 60).ToString("00");
         }
 
         private PlayerAvatar FindSelf()
@@ -143,6 +311,7 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return;
             }
+            ResetSchedule();
             AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _wavPath);
         }
 
@@ -151,6 +320,7 @@ namespace RainyLove
         {
             if (AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.Aizo))
             {
+                ResetSchedule();
                 AudioChannel.Instance.StopManual(AudioSourceKey.Aizo);
                 Plugin.Log.LogMessage("[rainylove][AIZO] 配置界面：已停止 AIZO 播放。");
             }
@@ -163,9 +333,11 @@ namespace RainyLove
         /// <summary>音量 / 淡出被改动：作废已渲染的 WAV，下次播放按新参数重新渲染。只打断自动播放。</summary>
         public void OnParamChanged()
         {
+            ResetSchedule();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);
             _audioReady = false;
             _wavPath = null;
+            _duration = 0f;
             Plugin.Log.LogMessage("[rainylove][AIZO] 音频参数已变更，下次播放按新参数重新渲染。");
         }
 
@@ -180,7 +352,9 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return false;
             }
-            return AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _wavPath);
+            bool ok = AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _wavPath);
+            if (ok) ResetSchedule();     // 新的一次播放，节点计划从头开始
+            return ok;
         }
     }
 

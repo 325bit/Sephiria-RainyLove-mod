@@ -5,7 +5,7 @@ using BepInEx.Logging;
 
 namespace RainyLove
 {
-    [BepInPlugin("com.rainylove.lastsurvivor", "rainylove - Last Survivor", "1.2.0")]
+    [BepInPlugin("com.rainylove.lastsurvivor", "rainylove - Last Survivor", "1.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -26,7 +26,6 @@ namespace RainyLove
         public static ConfigEntry<bool> AizoEnabled;
         public static ConfigEntry<float> AizoVolume;
         public static ConfigEntry<string> AizoAudioFilePath;
-        public static ConfigEntry<float> AizoFadeOutSeconds;
         public static ConfigEntry<float> AizoHealthPercent;  // 0~99（%）
         public static ConfigEntry<float> AizoHealthValue;    // 0~9999（固定值）
 
@@ -63,8 +62,6 @@ namespace RainyLove
                 new ConfigDescription("AIZO 播放音量 0~1", new AcceptableValueRange<float>(0f, 1f)));
             AizoAudioFilePath = Config.Bind("AIZO", "AudioFilePath", "",
                 "音频文件（AIZO.wav）所在目录或文件路径。留空时按默认位置查找");
-            AizoFadeOutSeconds = Config.Bind("AIZO", "FadeOutSeconds", 2f,
-                new ConfigDescription("AIZO 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 300f)));
             AizoHealthPercent = Config.Bind("AIZO", "HealthPercent", 30f,
                 new ConfigDescription("当自身血量百分比低于该值(0~99%)时播放", new AcceptableValueRange<float>(0f, 99f)));
             AizoHealthValue = Config.Bind("AIZO", "HealthValue", 30f,
@@ -90,9 +87,8 @@ namespace RainyLove
             Volume.SettingChanged += (s, e) => Watcher.OnParamChanged();
             FadeOutSeconds.SettingChanged += (s, e) => Watcher.OnParamChanged();
             AizoVolume.SettingChanged += (s, e) => Aizo.OnParamChanged();
-            AizoFadeOutSeconds.SettingChanged += (s, e) => Aizo.OnParamChanged();
 
-            Log.LogInfo("[rainylove] v1.2.0 已加载，RainyLove=" + Enabled.Value + " AIZO=" + AizoEnabled.Value
+            Log.LogInfo("[rainylove] v1.3.0 已加载，RainyLove=" + Enabled.Value + " AIZO=" + AizoEnabled.Value
                         + " 优先级=" + AudioPriority.Value);
             Log.LogInfo("[rainylove] " + MenuKey.Value.ToUpperInvariant()
                         + " 呼出配置界面；输入系统可用=" + InputBridge.Available

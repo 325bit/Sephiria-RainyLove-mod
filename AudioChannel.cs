@@ -28,6 +28,8 @@ namespace RainyLove
         private bool _currentManual;        // 当前是手动测试播放（手动总优先，自动不打断）
         private float _endTime;             // 自然结束的 unscaled 时间；<=0 表示未启用计时
         private string _currentWav;
+        private float _startTime;           // 本次播放开始的 unscaled 时间（用于算已播秒数）
+        private float _duration;            // 本次播放的音频总时长（秒）
 
         private void Awake()
         {
@@ -45,6 +47,8 @@ namespace RainyLove
                 _currentManual = false;
                 _endTime = 0f;
                 _currentWav = null;
+                _startTime = 0f;
+                _duration = 0f;
             }
         }
 
@@ -54,7 +58,20 @@ namespace RainyLove
             _current = null;
             _currentManual = false;
             _endTime = 0f;
+            _currentWav = null;
+            _startTime = 0f;
+            _duration = 0f;
         }
+
+        /// <summary>本来源当前已播放的秒数；未在播放该来源时返回 -1。</summary>
+        public float GetElapsedSeconds(AudioSourceKey src)
+        {
+            if (_current != src || _startTime <= 0f) return -1f;
+            return Time.unscaledTime - _startTime;
+        }
+
+        /// <summary>本来源当前音频的总时长（秒）；未知时返回 0。</summary>
+        public float GetDuration(AudioSourceKey src) => _current == src ? _duration : 0f;
 
         /// <summary>自动触发请求。返回 true 表示已经真正开始播放（调用方应置“本局已触发”标记，避免重复触发）。</summary>
         public bool StartAuto(AudioSourceKey src, string wavPath)
@@ -86,6 +103,8 @@ namespace RainyLove
                 _current = null;
                 _endTime = 0f;
                 _currentWav = null;
+                _startTime = 0f;
+                _duration = 0f;
             }
         }
 
@@ -106,6 +125,8 @@ namespace RainyLove
                 _currentManual = false;
                 _endTime = 0f;
                 _currentWav = null;
+                _startTime = 0f;
+                _duration = 0f;
             }
             // 注意：不在这里 PURGE 其它来源——否则按 A 的停止键会误杀 B 正在放的声音。
         }
@@ -130,6 +151,8 @@ namespace RainyLove
             _currentManual = manual;
             _currentWav = wavPath;
             float dur = AudioLoader.GetWavDuration(wavPath);
+            _duration = dur;
+            _startTime = Time.unscaledTime;
             _endTime = dur > 0f ? Time.unscaledTime + dur : 0f;
             Plugin.Log.LogMessage("[rainylove] 开始播放（" + src + (manual ? " · 手动测试" : " · 自动触发") + "）。");
         }
