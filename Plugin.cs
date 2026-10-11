@@ -19,7 +19,6 @@ namespace RainyLove
         public static ConfigEntry<string> AudioFilePath;
         public static ConfigEntry<float> ScanInterval;
         public static ConfigEntry<bool> OnlyWhenSelfIsLast;
-        public static ConfigEntry<float> FadeOutSeconds;   // RainyLove 只保留淡出（无淡入）
         public static ConfigEntry<int> ResampleHz;
 
         // ===== AIZO =====
@@ -51,8 +50,6 @@ namespace RainyLove
             ScanInterval = Config.Bind("General", "ScanIntervalSec", 0.25f, "存活人数扫描间隔（秒）");
             OnlyWhenSelfIsLast = Config.Bind("General", "OnlyWhenSelfIsLast", false,
                 "仅当自己就是最后存活的玩家时才播放（关闭时任何客户端检测到剩 1 人都会播放）");
-            FadeOutSeconds = Config.Bind("Audio", "FadeOutSeconds", 2f,
-                new ConfigDescription("RainyLove 结尾淡出时长（秒），0 表示不淡出", new AcceptableValueRange<float>(0f, 300f)));
             ResampleHz = Config.Bind("Audio", "ResampleHz", 44100,
                 "解码采样率（仅 ffmpeg 兜底用）。44100 音质最好但内存占用大；22050 可减半");
 
@@ -85,7 +82,6 @@ namespace RainyLove
 
             // 音量 / 淡出被改动：作废已渲染的 WAV，下次播放按新参数重新渲染（高开销延迟化）。
             Volume.SettingChanged += (s, e) => Watcher.OnParamChanged();
-            FadeOutSeconds.SettingChanged += (s, e) => Watcher.OnParamChanged();
             AizoVolume.SettingChanged += (s, e) => Aizo.OnParamChanged();
 
             Log.LogInfo("[rainylove] v1.3.0 已加载，RainyLove=" + Enabled.Value + " AIZO=" + AizoEnabled.Value

@@ -11,9 +11,20 @@ namespace RainyLove
     ///
     /// 本类只负责“什么时候放”，播放/停止全部交给 AudioChannel（统一仲裁 RainyLove 与 AIZO 的优先级）。
     /// 配置界面的“测试播放 / 停止播放”也通过 AudioChannel，且手动播放只受停止按钮控制。
+    ///
+    /// 停止策略与 AIZO 一致：条件解除（出本 / 团灭 / 存活回升到 &gt;1）时不立即停，
+    /// 而是顺延到时间轴节点再停：
+    ///     p1 = 00:00（开始） / p2 = 01:27.1 / p3 = 02:10.07 / p4 = 曲末
+    /// 节点前 10 秒内条件又满足（又只剩一人）→ 顺延到下一个节点；已到 p3 还触发 → 放完整首。
     /// </summary>
     public class LastSurvivorWatcher : MonoBehaviour
     {
+        // ===== 时间轴节点（秒）：p2 01:27.1 / p3 02:10.07 / p4 曲末；窗口 10 秒 =====
+        private readonly PlaybackNodeScheduler _sched = new PlaybackNodeScheduler(
+            new[] { 87.1f, 130.07f },
+            new[] { "p2 01:27.1", "p3 02:10.07", "p4 曲末" },
+            10f);
+
         private float _scanTimer;
         private bool _playedThisRun;
         private string _wavPath;
@@ -35,12 +46,18 @@ namespace RainyLove
         /// <summary>音频是否已按当前参数准备好（供配置界面显示状态）。</summary>
         public bool IsAudioReady => _audioReady;
 
+        /// <summary>渲染出来的临时 WAV 是否仍然可用（临时目录可能被清理、或被别处误删）。
+        /// 用这个判断而不是只看 _audioReady，否则会出现“显示就绪、点了却没声音”。</summary>
+        private bool IsUsable => _audioReady
+                                 && !string.IsNullOrEmpty(_wavPath)
+                                 && System.IO.File.Exists(_wavPath);
+
         public void Initialize()
         {
             StartCoroutine(LoadClip());
         }
 
-        /// <summary>按当前音量 / 淡出准备 WAV（淡入已移除）。加载完成后若存在待播放请求则立即播放。</summary>
+        /// <summary>按当前音量准备 WAV（淡入淡出已取消）。加载完成后若存在待播放请求则立即播放。</summary>
         private IEnumerator LoadClip()
         {
             if (_reloading) yield break;
@@ -58,13 +75,15 @@ namespace RainyLove
             }
 
             // 本构建里 Unity 音频管线失效，改走 Windows 系统音频（winmm PlaySound）。
-            // 音量缩放 + 淡出包络烘焙进临时 WAV（不依赖 ffmpeg）。RainyLove 无淡入（fadeIn=0）。
+            // 只把音量缩放烘焙进临时 WAV（不依赖 ffmpeg）；淡入淡出已取消，停止改由节点控制。
             string wavPath;
-            if (AudioLoader.TryPrepareWav(path, Plugin.Volume.Value, 0f, Plugin.FadeOutSeconds.Value, out wavPath))
+            if (AudioLoader.TryPrepareWav(path, Plugin.Volume.Value, 0f, 0f, out wavPath))
             {
                 _wavPath = wavPath;
+                _sched.Duration = AudioLoader.GetWavDuration(wavPath);
                 _audioReady = true;
-                Plugin.Log.LogInfo("[rainylove] 音频就绪（系统播放）：" + wavPath);
+                Plugin.Log.LogInfo("[rainylove] 音频就绪（系统播放）：" + wavPath
+                                   + "，时长 " + PlaybackNodeScheduler.Fmt(AudioLoader.GetWavDuration(wavPath)));
             }
             else
             {
@@ -79,6 +98,7 @@ namespace RainyLove
                 _manualAfterLoad = false;
                 if (_audioReady)
                 {
+                    _sched.Reset();
                     if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _wavPath);
                     else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _wavPath)) _playedThisRun = true;
                 }
@@ -89,9 +109,13 @@ namespace RainyLove
         {
             if (!Plugin.Enabled.Value)
             {
+                _sched.Reset();
                 AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);   // 总开关只停自动播放，手动测试不受影响
                 return;
             }
+
+            // “到节点就停”每帧检查，避免 0.25s 扫描间隔带来的过冲。
+            TickScheduledStop();
 
             _scanTimer += Time.unscaledDeltaTime;
             if (_scanTimer >= Plugin.ScanInterval.Value)
@@ -103,6 +127,7 @@ namespace RainyLove
 
         private void OnDestroy()
         {
+            _sched.Reset();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
             AudioChannel.Instance?.StopManual(AudioSourceKey.RainyLove);
         }
@@ -129,42 +154,78 @@ namespace RainyLove
             if (inDungeonTotal > _peakInDungeon) _peakInDungeon = inDungeonTotal;
             if (inDungeonTotal >= 2) _multiplayerRoom = true;
 
-            // 地牢彻底清空：停止仍在播放的音乐，并复位整轮状态。
+            // 地牢彻底清空：不再立即停，顺延到节点；同时复位整轮状态。
             if (inDungeonTotal == 0)
             {
-                AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
+                ScanCondition(false);
                 _multiplayerRoom = false;
                 _peakInDungeon = 0;
                 _playedThisRun = false;
                 return;
             }
 
-            if (!_multiplayerRoom) { _playedThisRun = false; return; }
+            if (!_multiplayerRoom) { ScanCondition(false); _playedThisRun = false; return; }
 
-            // 团灭：已无人存活，停止播放，允许下一局重新触发。
-            if (inDungeonAlive == 0)
+            // 触发条件：多人局 + 峰值 >=2 + 地牢内只剩 1 人存活
+            // （OnlyWhenSelfIsLast 时还要求这最后一人是自己）。
+            bool lastSurvivor = _multiplayerRoom
+                                && _peakInDungeon >= 2
+                                && inDungeonAlive == 1
+                                && (!Plugin.OnlyWhenSelfIsLast.Value || selfInDungeonAlive);
+
+            // 团灭(alive==0) / 存活回升到 >1 都会让 lastSurvivor 变假 → 走节点顺延停止。
+            ScanCondition(lastSurvivor);
+
+            if (!_playedThisRun && lastSurvivor)
             {
-                AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
-                _playedThisRun = false;
+                _playedThisRun = true;
+                AutoPlay();
+            }
+        }
+
+        /// <summary>把一次“条件是否满足”喂给节点调度器；没在自动播放时清空计划并允许下次重播。</summary>
+        private void ScanCondition(bool conditionMet)
+        {
+            AudioChannel ch = AudioChannel.Instance;
+            bool autoPlaying = ch != null && ch.IsPlaying(AudioSourceKey.RainyLove)
+                               && !ch.IsManualPlaying(AudioSourceKey.RainyLove);
+            if (!autoPlaying)
+            {
+                _sched.Reset();
+                // 只在“条件已经不成立”时才重新武装，否则最后存活者会一直循环重播整首。
+                if (!conditionMet) _playedThisRun = false;
                 return;
             }
 
-            // 存活回升到 >1：视为这一轮结束，停止并允许将来再次触发。
-            if (inDungeonAlive > 1)
+            float elapsed = ch.GetElapsedSeconds(AudioSourceKey.RainyLove);
+            if (elapsed < 0f) { _sched.Reset(); return; }
+
+            string msg = _sched.OnScan(conditionMet, elapsed);
+            if (msg != null) Plugin.Log.LogMessage("[rainylove] " + msg);
+        }
+
+        /// <summary>每帧检查：已播到计划的节点就停（无淡出，直接停）。</summary>
+        private void TickScheduledStop()
+        {
+            if (!_sched.HasPlan) return;
+
+            AudioChannel ch = AudioChannel.Instance;
+            if (ch == null) return;
+            if (!ch.IsPlaying(AudioSourceKey.RainyLove) || ch.IsManualPlaying(AudioSourceKey.RainyLove)) return;
+
+            float elapsed = ch.GetElapsedSeconds(AudioSourceKey.RainyLove);
+            if (elapsed < 0f) { _sched.Reset(); return; }
+
+            int verdict = _sched.CheckStop(elapsed, out string msg);
+            if (verdict == PlaybackNodeScheduler.NoStop) return;
+
+            if (verdict == PlaybackNodeScheduler.StopNow)
             {
-                AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
-                _playedThisRun = false;
-                return;
+                ch.StopAuto(AudioSourceKey.RainyLove);
+                _sched.Reset();
+                // 不在这里复位 _playedThisRun：由下一次扫描按当前条件决定（条件仍成立就不重播）。
             }
-
-            if (_playedThisRun) return;
-            if (inDungeonAlive != 1) return;
-            if (_peakInDungeon < 2) return;
-
-            if (Plugin.OnlyWhenSelfIsLast.Value && !selfInDungeonAlive) return;
-
-            _playedThisRun = true;
-            AutoPlay();
+            Plugin.Log.LogMessage("[rainylove] " + msg + "。");
         }
 
         // ===================== 供配置界面调用的播放控制 =====================
@@ -173,13 +234,14 @@ namespace RainyLove
         public void TestPlay()
         {
             Plugin.Log.LogMessage("[rainylove] 配置界面：RainyLove 测试播放。");
-            if (!_audioReady || string.IsNullOrEmpty(_wavPath))
+            if (!IsUsable)
             {
                 _playAfterLoad = true;
                 _manualAfterLoad = true;
                 if (!_reloading) StartCoroutine(LoadClip());
                 return;
             }
+            _sched.Reset();
             AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _wavPath);
         }
 
@@ -188,6 +250,7 @@ namespace RainyLove
         {
             if (AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.RainyLove))
             {
+                _sched.Reset();
                 AudioChannel.Instance.StopManual(AudioSourceKey.RainyLove);
                 Plugin.Log.LogMessage("[rainylove] 配置界面：已停止 RainyLove 播放。");
             }
@@ -197,10 +260,11 @@ namespace RainyLove
             }
         }
 
-        /// <summary>音量 / 淡出被改动：作废已渲染的 WAV，下次播放按新参数重新渲染。
+        /// <summary>音量被改动：作废已渲染的 WAV，下次播放按新参数重新渲染。
         /// 只打断自动播放；手动测试播放不受影响（只受停止按钮控制）。</summary>
         public void OnParamChanged()
         {
+            _sched.Reset();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
             _audioReady = false;
             _wavPath = null;
@@ -212,14 +276,18 @@ namespace RainyLove
         /// <summary>条件触发播放：音频就绪直接请求仲裁；否则排队等加载完。</summary>
         private void AutoPlay()
         {
-            if (!_audioReady || string.IsNullOrEmpty(_wavPath))
+            if (!IsUsable)
             {
                 _playAfterLoad = true;
                 _manualAfterLoad = false;
                 if (!_reloading) StartCoroutine(LoadClip());
                 return;
             }
-            if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _wavPath)) _playedThisRun = true;
+            if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _wavPath))
+            {
+                _playedThisRun = true;
+                _sched.Reset();     // 新的一次播放，节点计划从头开始
+            }
         }
     }
 }

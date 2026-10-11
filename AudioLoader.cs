@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -458,12 +459,22 @@ namespace RainyLove
         // 本构建里 Unity 的 AudioClip.Create/SetData 与 UnityWebRequest 全部失效
         // （UWR 连本地 200 响应都报 ConnectionError），故放弃在 Unity 内部造 AudioClip，
         // 改成用 ffmpeg 把源文件解码成 WAV，交给 Windows 系统音频 API（winmm PlaySound）直接播放。
-        private static string _lastCacheWav;
-
-        // 渲染结果缓存：参数（源文件 + 音量 + 淡入淡出）没变时复用上一次的临时 WAV，
+        // 渲染结果缓存：key（源文件|音量|淡入|淡出）→ 临时 WAV 路径。
         // 避免在配置界面里反复点“测试播放”时把 40MB 的文件重复渲染一遍。
-        private static string _renderKey;
-        private static string _renderPath;
+        //
+        // 必须按 key 分开放，绝不能只留一份“上一次”：RainyLove 和 AIZO 是两个独立音源、
+        // 各自长期持有一份渲染结果，共用单份缓存会让后渲染的那个把前一个正在用的临时文件删掉，
+        // 表现为“前一个音源点了播放却完全没声音”（历史 bug：主菜单点 RainyLove 测试播放无声）。
+        private static readonly Dictionary<string, string> _renderCache = new Dictionary<string, string>();
+
+        // ffmpeg 解码缓存：源 mp3 路径 → 解码出的临时 WAV。同样按来源分开，理由同上。
+        private static readonly Dictionary<string, string> _decodeCache = new Dictionary<string, string>();
+
+        // “每个源文件当前正在用的临时 WAV”（key, path）。
+        // 参数变了要重渲染时，用它淘汰同一音源上一次的文件，避免临时目录里堆满 40MB 的旧副本。
+        // 同样按源文件分开——绝不能顺手把另一个音源正在用的文件删掉。
+        private static readonly Dictionary<string, KeyValuePair<string, string>> _bySource
+            = new Dictionary<string, KeyValuePair<string, string>>();
 
         /// <summary>准备一个可直接被系统音频播放的 WAV 文件路径：
         ///   入参 wavPath 即打包好的 rainylove.wav（由 Plugin.ResolveAudioPath 直接解析，不再依赖 mp3）。
@@ -539,9 +550,10 @@ namespace RainyLove
                              + "|" + vol.ToString("F3", CultureInfo.InvariantCulture)
                              + "|" + fadeInSec.ToString("F2", CultureInfo.InvariantCulture)
                              + "|" + fadeOutSec.ToString("F2", CultureInfo.InvariantCulture);
-                if (_renderKey == key && _renderPath != null && File.Exists(_renderPath))
+                if (_renderCache.TryGetValue(key, out string cached)
+                    && !string.IsNullOrEmpty(cached) && File.Exists(cached))
                 {
-                    outWav = _renderPath;
+                    outWav = cached;
                     return true;
                 }
 
@@ -611,12 +623,21 @@ namespace RainyLove
                     }
                 }
 
-                DeleteCacheFile(_lastCacheWav);
+                // 只淘汰“同一个 key”的旧文件（参数变了才需要重渲染），
+                // 绝不删别的音源正在用的临时文件。
+                if (_renderCache.TryGetValue(key, out string stale)) DeleteCacheFile(stale);
+
+                // 淘汰同一音源上一次的副本（参数变过才会走到这里）
+                if (_bySource.TryGetValue(srcWav, out KeyValuePair<string, string> prev) && prev.Value != null)
+                {
+                    if (prev.Value != stale) DeleteCacheFile(prev.Value);
+                    _renderCache.Remove(prev.Key);
+                }
+
                 string tmp = Path.Combine(Path.GetTempPath(), "rainylove_mix_" + Guid.NewGuid().ToString("N") + ".wav");
                 File.WriteAllBytes(tmp, outBuf);
-                _lastCacheWav = tmp;
-                _renderKey = key;
-                _renderPath = tmp;
+                _renderCache[key] = tmp;
+                _bySource[srcWav] = new KeyValuePair<string, string>(key, tmp);
                 outWav = tmp;
                 return true;
             }
@@ -643,10 +664,10 @@ namespace RainyLove
             string ffmpeg = ResolveFfmpegPath();
             if (string.IsNullOrEmpty(ffmpeg)) return false;
 
-            // 删除上一次缓存（若正被 PlaySound 占用则忽略错误，Windows 会延后删除）
-            DeleteCacheFile(_lastCacheWav);
+            // 只删除“同一个源”上一次解码出来的文件（若正被 PlaySound 占用则忽略错误，Windows 会延后删除）
+            if (_decodeCache.TryGetValue(mp3Path, out string staleDecode)) DeleteCacheFile(staleDecode);
             string cache = Path.Combine(Path.GetTempPath(), "rainylove_cache_" + Guid.NewGuid().ToString("N") + ".wav");
-            _lastCacheWav = cache;
+            _decodeCache[mp3Path] = cache;
 
             var psi = new ProcessStartInfo(ffmpeg)
             {
@@ -963,7 +984,14 @@ namespace RainyLove
 
         public static void Play(string wavPath)
         {
-            if (string.IsNullOrEmpty(wavPath) || !File.Exists(wavPath)) return;
+            // 文件不存在时一定要喊出来：历史上这里静默返回，
+            // 表现为“点了播放、日志显示已开始播放，但完全没声音”，极难排查。
+            if (string.IsNullOrEmpty(wavPath) || !File.Exists(wavPath))
+            {
+                Plugin.Log.LogWarning("[rainylove] 系统音频播放失败：音频文件不存在 → "
+                                      + (string.IsNullOrEmpty(wavPath) ? "(路径为空)" : wavPath));
+                return;
+            }
             try
             {
                 PlaySound(wavPath, IntPtr.Zero, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);

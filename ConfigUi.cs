@@ -203,28 +203,28 @@ namespace RainyLove
         // ---- RainyLove 子页（无淡入，启用移到主设置）----
         private void DrawRainyLove()
         {
-            SliderRow(124f, 150f, "播放音量", Percent(Plugin.Volume.Value),
+            SliderRow(118f, 144f, "播放音量", Percent(Plugin.Volume.Value),
                 Plugin.Volume.Value, 0f, 1f, 0.05f, v => Plugin.Volume.Value = Mathf.Round(v * 100f) / 100f);
 
-            SliderRow(186f, 212f, "淡出时长（秒）", Seconds(Plugin.FadeOutSeconds.Value),
-                Plugin.FadeOutSeconds.Value, 0f, 300f, 1f, v => Plugin.FadeOutSeconds.Value = Mathf.Round(v));
+            GUI.Label(new Rect(24f, 190f, WindowWidth - 48f, 22f),
+                "当不再是最后一名存活者时在节点处自动停止播放", _small);
 
-            Fill(new Rect(24f, 256f, WindowWidth - 48f, 1f), UiBorder);
+            Fill(new Rect(24f, 222f, WindowWidth - 48f, 1f), UiBorder);
 
             LastSurvivorWatcher rl = Plugin.Watcher;
-            DrawStatus(286f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
+            DrawStatus(248f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
 
             bool rlOn = Plugin.Enabled.Value;
             bool rlDisabled = !rlOn;
             GUI.enabled = !rlDisabled;
-            if (Button(new Rect(24f, 330f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
-            if (Button(new Rect(186f, 330f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
+            if (Button(new Rect(24f, 286f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
+            if (Button(new Rect(186f, 286f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 330f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 286f, 120f, 36f), "完成", true)) SetVisible(false);
 
-            GUI.Label(new Rect(24f, 384f, WindowWidth - 48f, 24f),
-                "RainyLove 仅剩最后一名存活者时播放；淡入已移除（只保留淡出）。启用开关在主设置里。", _small);
+            GUI.Label(new Rect(24f, 336f, WindowWidth - 48f, 24f),
+                "RainyLove 仅剩最后一名存活者时播放；条件解除后顺延到时间轴节点再停止。启用开关在主设置里。", _small);
         }
 
         // ---- AIZO 子页 ----
@@ -394,11 +394,6 @@ namespace RainyLove
         private static string Percent(float value)
         {
             return Mathf.RoundToInt(value * 100f) + "%";
-        }
-
-        private static string Seconds(float value)
-        {
-            return value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " 秒";
         }
 
         private static void Fill(Rect rect, Color color)
