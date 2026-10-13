@@ -2,109 +2,78 @@ using System;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using BepInEx.Unity.Mono;   // BepInEx 6：Unity Mono 插件的基类 BaseUnityPlugin 迁移到此命名空间/程序集
 
 namespace RainyLove
 {
-    [BepInPlugin("com.rainylove.lastsurvivor", "rainylove - Last Survivor", "1.3.0")]
+    [BepInPlugin("com.rainylove.lastsurvivor", "rainylove - Last Survivor", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
 
-        internal const string DefaultRainyWav = "rainylove.wav";
-        internal const string DefaultAizoWav = "AIZO.wav";
+        internal const string DefaultWavName = "rainylove.wav";
 
-        // ===== RainyLove（沿用旧 cfg 的 General / Audio 小节，保留用户已有设置）=====
         public static ConfigEntry<bool> Enabled;
         public static ConfigEntry<float> Volume;
         public static ConfigEntry<string> AudioFilePath;
         public static ConfigEntry<float> ScanInterval;
         public static ConfigEntry<bool> OnlyWhenSelfIsLast;
+        public static ConfigEntry<bool> EnableTestKey;
+        public static ConfigEntry<string> TestPlayKey;
         public static ConfigEntry<int> ResampleHz;
 
-        // ===== AIZO =====
-        public static ConfigEntry<bool> AizoEnabled;
-        public static ConfigEntry<float> AizoVolume;
-        public static ConfigEntry<string> AizoAudioFilePath;
-        public static ConfigEntry<float> AizoHealthPercent;  // 0~99（%）
-        public static ConfigEntry<float> AizoHealthValue;    // 0~9999（固定值）
-
-        // ===== 主设置 =====
-        public static ConfigEntry<AudioPriority> AudioPriority;
-        public static ConfigEntry<string> MenuKey;
-
         internal static LastSurvivorWatcher Watcher;
-        internal static AizoWatcher Aizo;
-        internal static Plugin Instance;
 
         private void Awake()
         {
             Log = base.Logger;
-            Instance = this;
 
-            // ---- RainyLove ----
-            Enabled = Config.Bind("General", "Enabled", true, "RainyLove 总开关（也可在主设置里切换）");
+            Enabled = Config.Bind("General", "Enabled", true, "总开关，关闭后不再检测与播放");
             Volume = Config.Bind("General", "Volume", 0.4f,
-                new ConfigDescription("播放音量 0~1（在 F7 配置界面里拖动滑块即时生效）", new AcceptableValueRange<float>(0f, 1f)));
+                new ConfigDescription("播放音量 0~1（运行时修改即时生效）", new AcceptableValueRange<float>(0f, 1f)));
             AudioFilePath = Config.Bind("General", "AudioFilePath", "",
                 "音频文件（rainylove.wav）所在目录或文件路径。留空时按 BepInEx/plugins/rainylove/Asset、mod 源码目录的顺序查找");
             ScanInterval = Config.Bind("General", "ScanIntervalSec", 0.25f, "存活人数扫描间隔（秒）");
             OnlyWhenSelfIsLast = Config.Bind("General", "OnlyWhenSelfIsLast", false,
                 "仅当自己就是最后存活的玩家时才播放（关闭时任何客户端检测到剩 1 人都会播放）");
+            EnableTestKey = Config.Bind("General", "EnableTestKey", true, "启用 F7 强制停止播放 / F6 强制播放，方便自测");
+            TestPlayKey = Config.Bind("General", "TestPlayKey", "f6",
+                "强制播放测试键（键名对应 InputSystem.Key 枚举，不区分大小写）。主菜单按下即完整走一遍解码与播放链路，不需要开联机");
             ResampleHz = Config.Bind("Audio", "ResampleHz", 44100,
-                "解码采样率（仅 ffmpeg 兜底用）。44100 音质最好但内存占用大；22050 可减半");
+                "解码采样率。44100 音质最好但内存占用大（约 70MB）；22050 可减半，16000 更小");
 
-            // ---- AIZO ----
-            AizoEnabled = Config.Bind("AIZO", "Enabled", true, "AIZO 总开关（也可在主设置里切换）");
-            AizoVolume = Config.Bind("AIZO", "Volume", 0.4f,
-                new ConfigDescription("AIZO 播放音量 0~1", new AcceptableValueRange<float>(0f, 1f)));
-            AizoAudioFilePath = Config.Bind("AIZO", "AudioFilePath", "",
-                "音频文件（AIZO.wav）所在目录或文件路径。留空时按默认位置查找");
-            AizoHealthPercent = Config.Bind("AIZO", "HealthPercent", 30f,
-                new ConfigDescription("当自身血量百分比低于该值(0~99%)时播放", new AcceptableValueRange<float>(0f, 99f)));
-            AizoHealthValue = Config.Bind("AIZO", "HealthValue", 30f,
-                new ConfigDescription("当自身血量低于该固定值(0~100)时播放", new AcceptableValueRange<float>(0f, 100f)));
-
-            // ---- 主设置 ----
-            AudioPriority = Config.Bind("主设置", "AudioPriority", RainyLove.AudioPriority.RainyLoveFirst,
-                "两个音频同时想播放时的优先级：RainyLove优先 / AIZO优先 / 先来后到");
-            MenuKey = Config.Bind("Interface", "MenuKey", "f7",
-                "呼出 / 关闭配置界面的按键（键名对应 InputSystem.Key 枚举，不区分大小写）");
-
-            var go = new UnityEngine.GameObject("RainyLove.Root");
+            var go = new UnityEngine.GameObject("RainyLove.Watcher");
             UnityEngine.Object.DontDestroyOnLoad(go);
             Watcher = go.AddComponent<LastSurvivorWatcher>();
-            Aizo = go.AddComponent<AizoWatcher>();
-            go.AddComponent<AudioChannel>();
-            go.AddComponent<ConfigUi>();
 
+            // 音频改用 Windows 系统音频（winmm PlaySound）直接播放，绕开本构建失效的
+            // Unity AudioClip.Create/SetData 与 UnityWebRequest。
             Watcher.Initialize();
-            Aizo.Initialize();
 
-            // 音量 / 淡出被改动：作废已渲染的 WAV，下次播放按新参数重新渲染（高开销延迟化）。
-            Volume.SettingChanged += (s, e) => Watcher.OnParamChanged();
-            AizoVolume.SettingChanged += (s, e) => Aizo.OnParamChanged();
+            // 运行时修改音量配置即时重准备音频（下次播放按新音量）
+            Volume.SettingChanged += (s, e) => { Watcher?.ReloadAudio(); };
 
-            Log.LogInfo("[rainylove] v1.3.0 已加载，RainyLove=" + Enabled.Value + " AIZO=" + AizoEnabled.Value
-                        + " 优先级=" + AudioPriority.Value);
-            Log.LogInfo("[rainylove] " + MenuKey.Value.ToUpperInvariant()
-                        + " 呼出配置界面；输入系统可用=" + InputBridge.Available
-                        + "，按键映射=" + InputBridge.IsKeyMapped(MenuKey.Value));
+            Log.LogInfo("[rainylove] 已加载，开关=" + Enabled.Value + " 音量=" + Volume.Value);
+
+            // 这里只做 API 层检查。Awake 阶段 Keyboard.current 通常还是 null，
+            // 真正的功能性自检由 LastSurvivorWatcher 在运行时触发（见 InputBridge.TickSelfCheck）。
+            Log.LogInfo("[rainylove] 输入系统可用=" + InputBridge.Available
+                        + "，F7 键名映射=" + InputBridge.IsKeyMapped("f7"));
         }
 
-        /// <summary>按配置解析音频文件绝对路径；fileName 指定 rainylove.wav / AIZO.wav。
-        /// 找不到时依次回退到默认位置。</summary>
-        internal static string ResolveAudioPath(string fileName, out bool fileExists)
+        /// <summary>按配置解析音频文件（rainylove.wav）绝对路径，找不到时依次回退到默认位置。
+        /// 直接认 WAV，不再依赖 mp3（mp3 仅为老安装的 ffmpeg 兜底源，非必需）。</summary>
+        internal static string ResolveAudioPath(out bool fileExists)
         {
             fileExists = false;
-            var configuredKey = fileName == DefaultAizoWav ? AizoAudioFilePath.Value : AudioFilePath.Value;
-            var configured = (configuredKey ?? string.Empty).Trim();
+            var configured = (AudioFilePath.Value ?? string.Empty).Trim();
 
             if (!string.IsNullOrEmpty(configured))
             {
                 var direct = System.IO.File.Exists(configured)
                     ? configured
                     : (System.IO.Directory.Exists(configured)
-                        ? System.IO.Path.Combine(configured, fileName)
+                        ? System.IO.Path.Combine(configured, DefaultWavName)
                         : null);
                 if (!string.IsNullOrEmpty(direct) && System.IO.File.Exists(direct))
                 {
@@ -115,9 +84,9 @@ namespace RainyLove
 
             var candidates = new[]
             {
-                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", "Asset", fileName),
-                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", fileName),
-                System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName),
+                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", "Asset", DefaultWavName),
+                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", DefaultWavName),
+                System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DefaultWavName),
             };
 
             foreach (var c in candidates)
@@ -125,6 +94,7 @@ namespace RainyLove
                 if (System.IO.File.Exists(c)) { fileExists = true; return c; }
             }
 
+            // 没找到：返回首选候选路径（用于报错提示），fileExists 保持 false
             return candidates[0];
         }
     }

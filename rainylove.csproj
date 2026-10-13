@@ -9,20 +9,30 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\$(Configuration)\</OutputPath>
     <GameDir Condition="'$(GameDir)' == ''">F:\SteamLibrary\steamapps\common\Sephiria</GameDir>
-    <ModRoot Condition="'$(ModRoot)' == ''">D:\workplace\Sephiria\mods\rainylove</ModRoot>
+    <ModRoot Condition="'$(ModRoot)' == ''">D:\workplace\Sephiria\mods\rainylove-bp6</ModRoot>
     <DeployMod Condition="'$(DeployMod)' == ''">false</DeployMod>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
 
+  <!-- BepInEx 6 前置：引用本地的 BepInEx 6 程序集（来自 libs/，从 BepInEx 6 Unity Mono 发行包提取）。
+       运行时需要游戏安装 BepInEx 6（Unity Mono）才能加载本插件。 -->
   <ItemGroup>
-    <Reference Include="BepInEx">
-      <HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath>
+    <Reference Include="BepInEx.Core">
+      <HintPath>$(MSBuildProjectDirectory)\libs\BepInEx.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
+    <Reference Include="BepInEx.Unity.Common">
+      <HintPath>$(MSBuildProjectDirectory)\libs\BepInEx.Unity.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="BepInEx.Unity.Mono">
+      <HintPath>$(MSBuildProjectDirectory)\libs\BepInEx.Unity.Mono.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 游戏自身程序集（与 BepInEx 版本无关，随游戏提供） -->
+  <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(GameDir)\Sephiria_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
@@ -35,14 +45,6 @@
       <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <Reference Include="Mirror">
       <HintPath>$(GameDir)\Sephiria_Data\Managed\Mirror.dll</HintPath>
       <Private>false</Private>
@@ -52,14 +54,5 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
-
-  <!-- -p:DeployMod=true 时，编译完自动把 dll 部署到游戏的 BepInEx/plugins/rainylove -->
-  <Target Name="DeployMod" AfterTargets="Build" Condition="'$(DeployMod)' == 'true'">
-    <ItemGroup>
-      <DeployFiles Include="$(TargetDir)$(AssemblyName).dll" />
-    </ItemGroup>
-    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(GameDir)\BepInEx\plugins\rainylove" />
-    <Message Importance="high" Text="已部署：$(GameDir)\BepInEx\plugins\rainylove\$(AssemblyName).dll" />
-  </Target>
 
 </Project>
