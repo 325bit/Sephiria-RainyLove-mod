@@ -46,7 +46,7 @@ namespace RainyLove
             Volume = Config.Bind("General", "Volume", 0.4f,
                 new ConfigDescription("播放音量 0~1（在 F7 配置界面里拖动滑块即时生效）", new AcceptableValueRange<float>(0f, 1f)));
             AudioFilePath = Config.Bind("General", "AudioFilePath", "",
-                "音频文件（rainylove.wav）所在目录或文件路径。留空时按 BepInEx/plugins/rainylove/Asset、mod 源码目录的顺序查找");
+                "音频文件（rainylove.wav）所在目录或文件路径。留空时按 BepInEx/plugins/RainyLove_AIZO/Asset、mod 源码目录的顺序查找");
             ScanInterval = Config.Bind("General", "ScanIntervalSec", 0.25f, "存活人数扫描间隔（秒）");
             OnlyWhenSelfIsLast = Config.Bind("General", "OnlyWhenSelfIsLast", false,
                 "仅当自己就是最后存活的玩家时才播放（关闭时任何客户端检测到剩 1 人都会播放）");
@@ -115,8 +115,8 @@ namespace RainyLove
 
             var candidates = new[]
             {
-                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", "Asset", fileName),
-                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "rainylove", fileName),
+                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "RainyLove_AIZO", "Asset", fileName),
+                System.IO.Path.Combine(BepInEx.Paths.PluginPath, "RainyLove_AIZO", fileName),
                 System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName),
             };
 
