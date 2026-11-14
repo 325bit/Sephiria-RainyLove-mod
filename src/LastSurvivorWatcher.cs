@@ -27,7 +27,9 @@ namespace RainyLove
 
         private float _scanTimer;
         private bool _playedThisRun;
-        private string _wavPath;
+        private string _playPath;
+        private float _playVolume = 1f;
+        private bool _volumeBaked;    // True when the volume was baked into a temp WAV, so a volume change must reload
         private bool _audioReady;
         private bool _reloading;      // LoadClip coroutine in progress
         private bool _playAfterLoad;  // Start auto playback as soon as loading completes (audio was not ready when the condition triggered)
@@ -46,48 +48,51 @@ namespace RainyLove
         /// <summary>Whether audio has been prepared with the current parameters (shown as status in the config UI).</summary>
         public bool IsAudioReady => _audioReady;
 
-        /// <summary>Whether the rendered temporary WAV is still usable (the temp directory may be cleaned or the file removed elsewhere).
+        /// <summary>Whether the prepared audio is still usable (the temp directory may be cleaned or the file removed elsewhere).
         /// Use this instead of _audioReady alone, otherwise the UI shows 'ready' but clicking play produces no sound.</summary>
         private bool IsUsable => _audioReady
-                                 && !string.IsNullOrEmpty(_wavPath)
-                                 && System.IO.File.Exists(_wavPath);
+                                 && !string.IsNullOrEmpty(_playPath)
+                                 && System.IO.File.Exists(_playPath);
 
         public void Initialize()
         {
             StartCoroutine(LoadClip());
         }
 
-        /// <summary>Prepare the WAV at the current volume (fade-in/out removed). Plays pending requests as soon as loading completes.</summary>
+        /// <summary>Resolve the audio file and prepare it for playback. Nothing is decoded here: MCI decodes MP3 at
+        /// playback time, and only user-supplied WAV files get a volume-baked temp copy.</summary>
         private IEnumerator LoadClip()
         {
             if (_reloading) yield break;
             _reloading = true;
             _audioReady = false;
-            _wavPath = null;
+            _playPath = null;
 
-            string path = ModConfig.ResolveAudioPath(ModConfig.DefaultRainyWav, out bool exists);
+            string path = ModConfig.ResolveAudioPath(ModConfig.DefaultRainyBase, out bool exists);
             if (!exists)
             {
-                Log.Warning("[rainylove] 找不到音频文件（需要 rainylove.wav）：" + path +
+                Log.Warning("[rainylove] 找不到音频文件（需要 rainylove.mp3 或 rainylove.wav）：" + path +
                                       "。请把文件放到 WorkshopLocal/rainylove/Asset/ 下");
                 _reloading = false;
                 yield break;
             }
 
-            // Unity's audio pipeline is broken in this build, so playback goes through the Windows system audio API (winmm PlaySound).
-            // Only volume scaling is baked into a temporary WAV (no ffmpeg dependency); fade-in/out was removed and stopping is node-controlled.
-            string wavPath;
-            if (AudioLoader.TryPrepareWav(path, ModConfig.Volume, 0f, 0f, out wavPath))
+            // Unity's audio pipeline is broken in this build, so playback goes through the Windows system audio
+            // interface (winmm MCI). Fade-in/out was removed and stopping is node-controlled.
+            if (AudioLoader.TryPrepareAudio(path, ModConfig.Volume, out string playPath, out float playVolume))
             {
-                _wavPath = wavPath;
-                _sched.Duration = AudioLoader.GetWavDuration(wavPath);
+                _playPath = playPath;
+                _playVolume = playVolume;
+                _volumeBaked = !string.Equals(playPath, path, System.StringComparison.OrdinalIgnoreCase);
+                float duration = AudioLoader.GetAudioDuration(playPath);
+                _sched.Duration = duration;
                 _audioReady = true;
-                Log.Info("[rainylove] 音频就绪（系统播放）：" + wavPath
-                                   + "，时长 " + PlaybackNodeScheduler.Fmt(AudioLoader.GetWavDuration(wavPath)));
+                Log.Info("[rainylove] 音频就绪（系统播放）：" + playPath
+                                   + "，时长 " + PlaybackNodeScheduler.Fmt(duration));
             }
             else
             {
-                Log.Warning("[rainylove] 音频准备失败：需要 rainylove.wav：" + path);
+                Log.Warning("[rainylove] 音频准备失败：需要 rainylove.mp3 或 rainylove.wav：" + path);
             }
             _reloading = false;
 
@@ -99,8 +104,8 @@ namespace RainyLove
                 if (_audioReady)
                 {
                     _sched.Reset();
-                    if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _wavPath);
-                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _wavPath)) _playedThisRun = true;
+                    if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _playPath, _playVolume);
+                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume)) _playedThisRun = true;
                 }
             }
         }
@@ -242,7 +247,7 @@ namespace RainyLove
                 return;
             }
             _sched.Reset();
-            AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _wavPath);
+            AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _playPath, _playVolume);
         }
 
         /// <summary>Config UI 'Stop Playback'.</summary>
@@ -260,14 +265,19 @@ namespace RainyLove
             }
         }
 
-        /// <summary>Volume changed: invalidate the rendered WAV so the next playback re-renders with new parameters.
-        /// Interrupts auto playback only; manual test playback is unaffected (only the stop button can end it).</summary>
+        /// <summary>Volume changed: for MP3 the device applies the new volume on the next play, so nothing has to be
+        /// re-prepared; a volume-baked WAV copy does have to be re-rendered. Interrupts auto playback only.</summary>
         public void OnParamChanged()
         {
             _sched.Reset();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
+            if (!_volumeBaked)
+            {
+                Log.Message("[rainylove] RainyLove 音量已更新，下次播放直接使用新音量。");
+                return;
+            }
             _audioReady = false;
-            _wavPath = null;
+            _playPath = null;
             Log.Message("[rainylove] RainyLove 音频参数已变更，下次播放按新参数重新渲染。");
         }
 
@@ -283,7 +293,7 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return;
             }
-            if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _wavPath))
+            if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume))
             {
                 _playedThisRun = true;
                 _sched.Reset();     // A new playback starts, so reset the node schedule

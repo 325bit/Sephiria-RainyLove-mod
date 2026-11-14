@@ -42,6 +42,7 @@ namespace RainyLove
         protected override void OnModUnloaded()
         {
             AudioChannel.Instance?.StopAll();
+            SystemAudio.Shutdown();   // Release the STA audio thread and its MCI device
             if (_root != null)
             {
                 Object.Destroy(_root);

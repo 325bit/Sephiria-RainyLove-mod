@@ -3,80 +3,100 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
-using UnityEngine;
+using System.Text;
+using System.Threading;
 
 namespace RainyLove
 {
     /// <summary>
-    /// Audio loading for the official Workshop build.
+    /// Audio preparation for the official Workshop build.
     ///
-    /// Playback goes through the Windows system audio API (winmm PlaySound) because this game's Unity audio
-    /// pipeline is unreliable. Only 16-bit PCM WAV files are accepted: the old ffmpeg/HTTP-server fallback paths
-    /// were removed because external process execution and a local TCP server are prohibited by the Workshop review
-    /// system (they would trip the "out-of-Workshop code execution" / network warnings).
+    /// Playback goes through the Windows MCI interface (winmm mciSendString) because this game's Unity audio
+    /// pipeline is unreliable, and MCI can decode MP3 through the system codec without bundling a decoder.
+    /// The old ffmpeg / local-HTTP-server paths were removed earlier: external process execution and a TCP
+    /// server are prohibited by the Workshop review system.
     ///
-    /// Volume scaling is baked into a temporary WAV in pure C# (no external dependency). The packaged WAV is used
-    /// directly when volume is effectively 1 and no fade is applied.
+    /// Two source formats are supported:
+    ///   - .mp3 : handed to MCI as-is; volume is applied by the MCI audio device (setaudio volume).
+    ///   - .wav : MCI's waveaudio device does NOT support setaudio (verified: MCIERR_UNSUPPORTED_FUNCTION),
+    ///           so the volume is baked into a temporary PCM WAV in pure C# instead.
+    ///
+    /// Every playable file must be 16-bit PCM when it is a .wav (the renderer only handles that); the packaged
+    /// audio is MP3, so the temporary-file path is only used for user-supplied WAV overrides.
     /// </summary>
     public static class AudioLoader
     {
-        // Render cache: key (source file | volume | fade) -> temporary WAV path. Separated by source so the two
-        // independent audio sources never delete each other's temp file.
+        // Render cache for the WAV path: key (source file | volume) -> temporary WAV path.
         private static readonly Dictionary<string, string> _renderCache = new Dictionary<string, string>();
         private static readonly Dictionary<string, KeyValuePair<string, string>> _bySource
             = new Dictionary<string, KeyValuePair<string, string>>();
 
-        /// <summary>Prepare a WAV file path that system audio can play directly.
-        /// 0) Volume ~1: play the original packaged WAV directly (no copy at all).
-        /// 1) Otherwise: bake a temporary WAV (pure C#) with volume scaling.
-        /// When true is returned, outWav points to a valid file.</summary>
-        public static bool TryPrepareWav(string wavPath, float volume, float fadeInSeconds, float fadeOutSeconds, out string outWav)
+        private static bool IsMp3(string path)
         {
-            outWav = null;
-            if (string.IsNullOrEmpty(wavPath)) return false;
+            return path != null && path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Resolve a source file into something the player can actually play.
+        /// For .mp3 the source path is returned untouched and playVolume is the volume to apply at playback time.
+        /// For .wav the volume is baked into a temporary PCM WAV and playVolume is 1 (the waveaudio device has no
+        /// volume control). Returns false only when the source file is missing or unreadable.</summary>
+        public static bool TryPrepareAudio(string srcPath, float volume, out string playPath, out float playVolume)
+        {
+            playPath = null;
+            playVolume = 1f;
+            if (string.IsNullOrEmpty(srcPath)) return false;
 
             float vol = volume < 0f ? 0f : (volume > 1f ? 1f : volume);
-            float fadeIn = fadeInSeconds < 0f ? 0f : fadeInSeconds;
-            float fadeOut = fadeOutSeconds < 0f ? 0f : fadeOutSeconds;
 
-            if (File.Exists(wavPath))
+            if (!File.Exists(srcPath))
             {
-                if (vol >= 0.999f && fadeIn <= 0.001f && fadeOut <= 0.001f)
-                {
-                    outWav = wavPath;
-                    Log.Info("[rainylove] 使用打包 WAV（无音量处理）：" + wavPath);
-                    return true;
-                }
+                Log.Warning("[rainylove] 找不到音频文件：" + srcPath);
+                return false;
+            }
 
-                if (RenderProcessedWav(wavPath, vol, fadeIn, fadeOut, out outWav))
-                {
-                    Log.Info(string.Format(CultureInfo.InvariantCulture,
-                        "[rainylove] 已渲染临时 WAV：音量={0:F2}，淡入={1:F1}s，淡出={2:F1}s → {3}",
-                        vol, fadeIn, fadeOut, outWav));
-                    return true;
-                }
-
-                Log.Warning("[rainylove] 音量渲染失败，将直接播放打包的全音量 WAV：" + wavPath);
-                outWav = wavPath;
+            if (IsMp3(srcPath))
+            {
+                // No rendering: MCI decodes the MP3 itself and the device applies the volume.
+                playPath = srcPath;
+                playVolume = vol;
+                Log.Info("[rainylove] 音频就绪（MCI 直接播放 MP3）：" + srcPath
+                                   + "，音量 " + vol.ToString("F2", CultureInfo.InvariantCulture));
                 return true;
             }
 
-            Log.Warning("[rainylove] 找不到音频文件（需要 rainylove.wav / AIZO.wav）：" + wavPath);
-            return false;
+            // .wav: bake the volume into a temporary PCM WAV, because waveaudio ignores setaudio.
+            if (vol >= 0.999f)
+            {
+                playPath = srcPath;
+                playVolume = 1f;
+                Log.Info("[rainylove] 音频就绪（MCI 直接播放 WAV，无音量处理）：" + srcPath);
+                return true;
+            }
+
+            if (RenderProcessedWav(srcPath, vol, out string rendered))
+            {
+                playPath = rendered;
+                playVolume = 1f;
+                Log.Info("[rainylove] 已渲染临时 WAV：音量=" + vol.ToString("F2", CultureInfo.InvariantCulture)
+                                   + " → " + rendered);
+                return true;
+            }
+
+            Log.Warning("[rainylove] 音量渲染失败，将直接播放原始 WAV（音量按 100%）：" + srcPath);
+            playPath = srcPath;
+            playVolume = 1f;
+            return true;
         }
 
-        /// <summary>Scale srcWav's 16-bit PCM samples by vol (0~1) and apply fadeInSec / fadeOutSec linear envelopes,
-        /// write the result to a temporary WAV and return its path. Pure C#, no ffmpeg. Standard 16-bit PCM only;
-        /// other formats return false so the caller can fall back. Cached by (source file + parameters).</summary>
-        private static bool RenderProcessedWav(string srcWav, float vol, float fadeInSec, float fadeOutSec, out string outWav)
+        /// <summary>Scale srcWav's 16-bit PCM samples by vol (0~1) and write the result to a temporary WAV.
+        /// Pure C#, no external decoder. Standard 16-bit PCM only; other formats return false so the caller can
+        /// fall back to the original file. Cached by (source file + volume).</summary>
+        private static bool RenderProcessedWav(string srcWav, float vol, out string outWav)
         {
             outWav = null;
             try
             {
-                string key = srcWav
-                             + "|" + vol.ToString("F3", CultureInfo.InvariantCulture)
-                             + "|" + fadeInSec.ToString("F2", CultureInfo.InvariantCulture)
-                             + "|" + fadeOutSec.ToString("F2", CultureInfo.InvariantCulture);
+                string key = srcWav + "|" + vol.ToString("F3", CultureInfo.InvariantCulture);
                 if (_renderCache.TryGetValue(key, out string cached)
                     && !string.IsNullOrEmpty(cached) && File.Exists(cached))
                 {
@@ -121,28 +141,17 @@ namespace RainyLove
                 long totalFrames = (end - dataBody) / frameBytes;
                 if (totalFrames <= 0) return false;
 
-                // Number of frames used by fade-in / fade-out (capped at total length)
-                int fadeInFrames = (int)Math.Min(totalFrames, Math.Round(fadeInSec * sampleRate));
-                int fadeOutFrames = (int)Math.Min(totalFrames, Math.Round(fadeOutSec * sampleRate));
-
                 // Copy the whole file and rewrite only the 16-bit samples in the data chunk
                 byte[] outBuf = (byte[])data.Clone();
                 for (long frame = 0; frame < totalFrames; frame++)
                 {
-                    float gain = vol;
-                    if (fadeInFrames > 0 && frame < fadeInFrames)
-                        gain *= (frame + 1f) / fadeInFrames;          // 0 -> vol linear fade-in
-                    long framesFromEnd = totalFrames - 1 - frame;
-                    if (fadeOutFrames > 0 && framesFromEnd < fadeOutFrames)
-                        gain *= (framesFromEnd + 1f) / fadeOutFrames; // vol -> 0 linear fade-out
-
                     int baseIndex = dataBody + (int)(frame * frameBytes);
                     for (int c = 0; c < channels; c++)
                     {
                         int i = baseIndex + c * 2;
                         if (i + 1 >= end) break;
                         int s = (short)(outBuf[i] | (outBuf[i + 1] << 8));
-                        int v = (int)(s * gain);
+                        int v = (int)(s * vol);
                         if (v > 32767) v = 32767;
                         else if (v < -32768) v = -32768;
                         outBuf[i] = (byte)(v & 0xFF);
@@ -175,16 +184,26 @@ namespace RainyLove
             }
         }
 
-        /// <summary>Delete the previous temporary WAV. Deletion fails while PlaySound holds the file; Windows reclaims it
-        /// after the handle is released, so ignore the error. Called only just before writing a new file.</summary>
+        /// <summary>Delete the previous temporary WAV. Deletion fails while a player still holds the file; Windows
+        /// reclaims it after the handle is released, so ignore the error. Called only just before writing a new file.</summary>
         private static void DeleteCacheFile(string path)
         {
             if (string.IsNullOrEmpty(path)) return;
             try { if (File.Exists(path)) File.Delete(path); } catch { /* in use, skip */ }
         }
 
-        /// <summary>Read WAV duration (seconds). Standard PCM only (format=1, 16-bit). Returns 0 on failure.
-        /// Used to reset state after test playback ends naturally: winmm PlaySound is async and has no completion callback.</summary>
+        /// <summary>Duration of a prepared audio file in seconds; 0 when unknown.
+        /// Used by the node scheduler (end-of-track node) and by the channel's natural-end timer: MCI has no
+        /// blocking 'finished' call, and its own length query is unreliable for MP3 (measured 674907 ms for a
+        /// 219370 ms file), so the duration is read from the file itself.</summary>
+        public static float GetAudioDuration(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return 0f;
+            if (IsMp3(path)) return Mp3Duration.GetSeconds(path);
+            return GetWavDuration(path);
+        }
+
+        /// <summary>Read WAV duration (seconds). Standard PCM only (format=1, 16-bit). Returns 0 on failure.</summary>
         public static float GetWavDuration(string wavPath)
         {
             try
@@ -233,55 +252,318 @@ namespace RainyLove
         }
     }
 
-    /// <summary>Windows system audio playback (winmm PlaySound), fully bypassing the broken Unity audio pipeline of this build.
-    /// Outputs directly to the Windows default device, with no dependency on Unity AudioClip / AudioSource / UnityWebRequest.</summary>
-    internal static class SystemAudio
+    /// <summary>
+    /// MP3 duration by walking the frame headers. Needed because MCI's own length query is wrong for these files
+    /// and because the node scheduler needs a real end-of-track time. Handles ID3v2 at the start, ID3v1 at the end,
+    /// MPEG-1 / MPEG-2 / MPEG-2.5 Layer III, CBR and VBR. Returns 0 when the file cannot be parsed.
+    /// </summary>
+    internal static class Mp3Duration
     {
-        [DllImport("winmm.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern int PlaySound(string pszSound, IntPtr hmod, uint fdwSound);
+        private static readonly int[] BitratesV1L3 = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 };
+        private static readonly int[] BitratesV2L3 = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 };
+        private static readonly int[] RatesV1 = { 44100, 48000, 32000 };
+        private static readonly int[] RatesV2 = { 22050, 24000, 16000 };
+        private static readonly int[] RatesV25 = { 11025, 12000, 8000 };
 
-        private const uint SND_FILENAME = 0x00020000;
-        private const uint SND_ASYNC = 0x00000001;
-        private const uint SND_NODEFAULT = 0x00000002;
-        private const uint SND_PURGE = 0x00000040;
-
-        public static void Play(string wavPath)
+        public static float GetSeconds(string path)
         {
-            // Always report a missing file: this used to return silently,
-            // causing 'clicked play, log says playback started, but no sound at all', which was very hard to diagnose.
-            if (string.IsNullOrEmpty(wavPath) || !File.Exists(wavPath))
-            {
-                Log.Warning("[rainylove] 系统音频播放失败：音频文件不存在 → "
-                            + (string.IsNullOrEmpty(wavPath) ? "(路径为空)" : wavPath));
-                return;
-            }
-            try
-            {
-                PlaySound(wavPath, IntPtr.Zero, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
-                Log.Info("[rainylove] 系统音频播放已发起：" + wavPath);
-            }
+            byte[] d;
+            try { d = File.ReadAllBytes(path); }
             catch (Exception e)
             {
-                Log.Warning("[rainylove] PlaySound 调用失败：" + e.GetType().Name + " - " + e.Message);
+                Log.Warning("[rainylove] 读取 MP3 失败：" + e.GetType().Name + " - " + e.Message);
+                return 0f;
+            }
+            if (d.Length < 4) return 0f;
+
+            int pos = 0;
+            if (d.Length > 10 && d[0] == 'I' && d[1] == 'D' && d[2] == '3')
+            {
+                int tagSize = ((d[6] & 0x7F) << 21) | ((d[7] & 0x7F) << 14) | ((d[8] & 0x7F) << 7) | (d[9] & 0x7F);
+                pos = Math.Min(d.Length, 10 + tagSize);
+            }
+
+            long samples = 0;
+            int rate = 0;
+            while (pos + 4 <= d.Length)
+            {
+                // Resync on the next 0xFF Ex byte pair after any garbage (ID3v1 trailing tag, padding, junk).
+                if (d[pos] != 0xFF || (d[pos + 1] & 0xE0) != 0xE0) { pos++; continue; }
+
+                int version = (d[pos + 1] >> 3) & 3;   // 3 = MPEG1, 2 = MPEG2, 0 = MPEG2.5, 1 = reserved
+                int layer = (d[pos + 1] >> 1) & 3;     // 1 = Layer III
+                int bitrateIndex = (d[pos + 2] >> 4) & 0x0F;
+                int rateIndex = (d[pos + 2] >> 2) & 3;
+                int padding = (d[pos + 2] >> 1) & 1;
+
+                if (version == 1 || layer != 1 || bitrateIndex == 0 || bitrateIndex == 15 || rateIndex == 3)
+                {
+                    pos++;
+                    continue;
+                }
+
+                bool v1 = version == 3;
+                int bitrate = (v1 ? BitratesV1L3 : BitratesV2L3)[bitrateIndex] * 1000;
+                int sampleRate = v1 ? RatesV1[rateIndex] : (version == 2 ? RatesV2[rateIndex] : RatesV25[rateIndex]);
+                int frameLength = (v1 ? 144 : 72) * bitrate / sampleRate + padding;
+                if (frameLength < 4) { pos++; continue; }
+
+                samples += v1 ? 1152 : 576;
+                rate = sampleRate;
+                pos += frameLength;
+
+                if (pos + 3 <= d.Length && d[pos] == 'T' && d[pos + 1] == 'A' && d[pos + 2] == 'G') break;
+            }
+
+            return rate > 0 ? (float)((double)samples / rate) : 0f;
+        }
+    }
+
+    /// <summary>
+    /// Windows system audio playback through MCI (winmm mciSendString), fully bypassing the broken Unity audio
+    /// pipeline. MCI decodes MP3 with the system codec, so no decoder is bundled and nothing is written to disk.
+    ///
+    /// Threading: every MCI command runs on one dedicated worker thread that initialises COM as **STA**.
+    /// This is not optional - the MPEG video driver (mciqtz32.dll) builds a DirectShow graph internally and
+    /// refuses to open on an MTA thread, failing with MCIERR_CANNOT_LOAD_DRIVER (266). Measured: the identical
+    /// "open ... type mpegvideo" succeeds on an STA thread and fails with 266 on an MTA thread. Running the
+    /// commands on our own thread also keeps the game main thread out of the device-open path.
+    ///
+    /// Single-device invariant: MCI happily runs several aliases at once (verified: two MP3s reported "playing"
+    /// simultaneously), and this mod must NEVER sound two tracks together. Play() therefore always closes the
+    /// previous device before opening the next one, and only one alias is ever tracked, so a second source can
+    /// only replace the first - never mix with it.
+    /// </summary>
+    internal static class SystemAudio
+    {
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int mciSendString(string command, StringBuilder returnValue, int returnLength, IntPtr hwndCallback);
+
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+        private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
+
+        [DllImport("ole32.dll")]
+        private static extern int CoInitializeEx(IntPtr reserved, uint coinit);
+
+        [DllImport("ole32.dll")]
+        private static extern void CoUninitialize();
+
+        private const uint COINIT_APARTMENTTHREADED = 0x2;
+        private const int CommandTimeoutMs = 8000;
+
+        private sealed class Job
+        {
+            public Action Run;
+            public ManualResetEventSlim Done;
+        }
+
+        private static readonly object _gate = new object();
+        private static readonly Queue<Job> _queue = new Queue<Job>();
+        private static Thread _worker;
+        private static bool _shutdown;
+
+        private static string _alias;   // Alias of the open device; owned by the worker thread
+
+        /// <summary>Open and start playback. Any previous sound is stopped first, so two tracks can never overlap.
+        /// Returns false when the device could not be opened or playback did not start.</summary>
+        public static bool Play(string audioPath, float volume)
+        {
+            bool ok = false;
+            RunOnWorker(() => { ok = PlayOnWorker(audioPath, volume); });
+            return ok;
+        }
+
+        /// <summary>Stop and release the current device. Closing (not just stopping) is what guarantees the next
+        /// Play() cannot overlap with this one.</summary>
+        public static void Stop(string audioPath)
+        {
+            RunOnWorker(() => StopOnWorker(audioPath));
+        }
+
+        /// <summary>Release the worker thread on mod unload. Safe to call when nothing ever played.</summary>
+        public static void Shutdown()
+        {
+            lock (_gate)
+            {
+                if (_worker == null) return;
+                _shutdown = true;
+                Monitor.Pulse(_gate);
+            }
+            try { _worker?.Join(2000); } catch { /* shutting down anyway */ }
+            lock (_gate)
+            {
+                _worker = null;
+                _shutdown = false;
+                _queue.Clear();
             }
         }
 
-        /// <summary>Interrupt current playback (stop all async PlaySound sounds in this process).
-        /// Key point: stopping requires pszSound=NULL + SND_PURGE; never pass a file name with SND_ASYNC + SND_PURGE -
-        /// on Windows that first stops the old instance and then asynchronously replays the same file, showing up as 'replay' instead of stop.
-        /// This mod is the only user of winmm PlaySound in this game, so stopping all async sounds is safe and equivalent.</summary>
-        public static void Stop(string wavPath)
+        private static void RunOnWorker(Action action)
+        {
+            var job = new Job { Run = action, Done = new ManualResetEventSlim(false) };
+            lock (_gate)
+            {
+                EnsureWorkerLocked();
+                _queue.Enqueue(job);
+                Monitor.Pulse(_gate);
+            }
+            if (!job.Done.Wait(CommandTimeoutMs))
+                Log.Warning("[rainylove] MCI 命令超时（" + CommandTimeoutMs + "ms），播放线程可能被阻塞。");
+        }
+
+        private static void EnsureWorkerLocked()
+        {
+            if (_worker != null) return;
+            _shutdown = false;
+            _worker = new Thread(WorkerLoop, 1024 * 1024)
+            {
+                IsBackground = true,   // never keep the game process alive
+                Name = "RainyLove.MciAudio"
+            };
+            // The apartment must be chosen BEFORE the thread starts: once it runs, the apartment is fixed and
+            // CoInitializeEx can no longer switch it (measured: calling CoInitializeEx(STA) inside the thread
+            // returns RPC_E_CHANGED_MODE because managed threads start as MTA).
+            try { _worker.SetApartmentState(ApartmentState.STA); }
+            catch (Exception e)
+            {
+                Log.Warning("[rainylove] 无法把播放线程设为 STA（" + e.GetType().Name + "），MP3 可能打不开。");
+            }
+            _worker.Start();
+        }
+
+        /// <summary>Worker thread body: STA apartment + FIFO command queue. Single-threaded by construction, so
+        /// MCI device state needs no locking and every command reaches the device in call order.</summary>
+        private static void WorkerLoop()
+        {
+            // STA is mandatory for the mpegvideo driver (see the class comment). SetApartmentState already did
+            // the work; this call is the fallback for hosts where that was unavailable, and its result is only
+            // reported so a wrong apartment shows up in the log instead of as silent 266 errors.
+            int hr = CoInitializeEx(IntPtr.Zero, COINIT_APARTMENTTHREADED);
+            if (hr == unchecked((int)0x80010106))
+                Log.Warning("[rainylove] 播放线程当前是 MTA（RPC_E_CHANGED_MODE），系统 MP3 解码器将无法打开。");
+            else if (hr < 0)
+                Log.Warning("[rainylove] MCI 线程 STA 初始化失败：0x" + hr.ToString("X8"));
+
+            try
+            {
+                while (true)
+                {
+                    Job job;
+                    lock (_gate)
+                    {
+                        while (_queue.Count == 0 && !_shutdown) Monitor.Wait(_gate);
+                        if (_queue.Count == 0 && _shutdown) break;
+                        job = _queue.Dequeue();
+                    }
+                    try { job.Run(); }
+                    catch (Exception e) { Log.Warning("[rainylove] MCI 命令异常：" + e.GetType().Name + " - " + e.Message); }
+                    finally { job.Done.Set(); }
+                }
+            }
+            finally
+            {
+                if (_alias != null) CloseDevice();
+                if (hr >= 0) CoUninitialize();
+            }
+        }
+
+        private static bool PlayOnWorker(string audioPath, float volume)
+        {
+            // Enforce the single-device invariant before touching the new file.
+            CloseDevice();
+
+            if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
+            {
+                Log.Warning("[rainylove] 系统音频播放失败：音频文件不存在 → "
+                            + (string.IsNullOrEmpty(audioPath) ? "(路径为空)" : audioPath));
+                return false;
+            }
+
+            string alias = "rlm" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            string device = audioPath.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ? "mpegvideo" : "waveaudio";
+
+            int rc = Send("open \"" + audioPath + "\" type " + device + " alias " + alias);
+            if (rc != 0)
+            {
+                Log.Warning("[rainylove] MCI 打开失败（" + device + "）：" + Describe(rc) + " → " + audioPath);
+                return false;
+            }
+
+            _alias = alias;
+
+            // The waveaudio device rejects setaudio (MCIERR_UNSUPPORTED_FUNCTION); WAV volume is baked instead.
+            if (device == "mpegvideo")
+            {
+                float v = volume < 0f ? 0f : (volume > 1f ? 1f : volume);
+                int level = (int)Math.Round(v * 1000f);
+                int vrc = Send("setaudio " + alias + " volume to " + level.ToString(CultureInfo.InvariantCulture));
+                if (vrc != 0)
+                    Log.Warning("[rainylove] MCI 设置音量失败（" + level + "）：" + Describe(vrc));
+            }
+
+            rc = Send("play " + alias);
+            if (rc != 0)
+            {
+                Log.Warning("[rainylove] MCI 播放失败：" + Describe(rc) + " → " + audioPath);
+                CloseDevice();
+                return false;
+            }
+
+            Log.Info("[rainylove] 系统音频播放已发起：" + audioPath);
+            return true;
+        }
+
+        private static void StopOnWorker(string audioPath)
+        {
+            if (_alias == null)
+            {
+                Log.Info("[rainylove] 系统音频已中断：" + (audioPath ?? "") + "（当前没有播放）");
+                return;
+            }
+            Send("stop " + _alias);
+            CloseDevice();
+            Log.Info("[rainylove] 系统音频已中断：" + (audioPath ?? ""));
+        }
+
+        /// <summary>Close the device if open. Errors are logged but never thrown: an already-closed alias is normal.</summary>
+        private static void CloseDevice()
+        {
+            string alias = _alias;
+            _alias = null;
+            if (alias == null) return;
+            int rc = Send("close " + alias);
+            if (rc != 0) Log.Info("[rainylove] MCI 关闭提示：" + Describe(rc));
+        }
+
+        private static int Send(string command)
         {
             try
             {
-                // pszSound=NULL + SND_PURGE: stop every async sound in the calling process without replaying anything.
-                PlaySound(null, IntPtr.Zero, SND_PURGE | SND_ASYNC);
-                Log.Info("[rainylove] 系统音频已中断：" + (wavPath ?? ""));
+                // Always pass a real buffer: "open" returns the device id as text, so the reply buffer is used
+                // even for commands whose return value we ignore.
+                var reply = new StringBuilder(256);
+                return mciSendString(command, reply, reply.Capacity, IntPtr.Zero);
             }
             catch (Exception e)
             {
-                Log.Warning("[rainylove] PlaySound 停止失败：" + e.GetType().Name + " - " + e.Message);
+                Log.Warning("[rainylove] MCI 调用异常：" + e.GetType().Name + " - " + e.Message);
+                return -1;
             }
+        }
+
+        /// <summary>Translate an MCI error code into readable text for the log.</summary>
+        private static string Describe(int code)
+        {
+            if (code == 0) return "成功";
+            string text = null;
+            try
+            {
+                var sb = new StringBuilder(256);
+                if (mciGetErrorString(code, sb, sb.Capacity)) text = sb.ToString();
+            }
+            catch { /* fall through to the numeric code */ }
+            string codeText = code.ToString(CultureInfo.InvariantCulture);
+            return string.IsNullOrEmpty(text) ? "错误码 " + codeText : code + " - " + text;
         }
     }
 }

@@ -1,18 +1,30 @@
 {
   "info": {
-    "title": "rainylove - Last Survivor",
-    "description": "多人最后存活播雨爱 / 残血播 AIZO（纯客户端表现，只影响自己的画面与声音）。把 rainylove.wav 与 AIZO.wav 放进 Asset/ 后启用。",
+    "title": "雨爱 & AIZO",
+    "description": "多人模式时场上剩下最后一个人播雨爱，残血播 AIZO。纯客户端mod，自己放自己听。进入存档F7打开设置面板",
     "preview": "thumbnail.png"
   },
   "mod": {
     "schemaVersion": 1,
     "modId": "rainylove.lastsurvivor",
-    "version": "1.4.2",
+    "version": "1.4.4",
     "author": "rainylove",
-    "multiplayer": { "installation": "local_only" },
+    "multiplayer": {
+      "installation": "local_only"
+    },
     "modules": [
-      { "type": "dll", "path": "bin/RainyLove.dll", "entryClass": "RainyLove.Entry" }
+      {
+        "type": "dll",
+        "path": "bin/RainyLove.dll",
+        "entryClass": "RainyLove.Entry"
+      },
+      {
+        "type": "data",
+        "path": "Asset"
+      }
     ]
   },
-  "tags": ["QoL"]
+  "tags": [
+    "QoL"
+  ]
 }

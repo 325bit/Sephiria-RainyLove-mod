@@ -13,8 +13,12 @@ namespace RainyLove
     /// </summary>
     internal static class ModConfig
     {
-        internal const string DefaultRainyWav = "rainylove.wav";
-        internal const string DefaultAizoWav = "AIZO.wav";
+        internal const string DefaultRainyBase = "rainylove";
+        internal const string DefaultAizoBase = "AIZO";
+
+        /// <summary>Extensions tried in order when resolving a default audio file. .wav wins so a user-supplied
+        /// lossless/PCM override still takes precedence over the packaged .mp3.</summary>
+        internal static readonly string[] AudioExtensions = { ".wav", ".mp3" };
 
         /// <summary>Absolute path to the mod folder. Set by Entry from Context.PackageRoot before Load().</summary>
         internal static string PackageRoot { get; set; }
@@ -25,7 +29,7 @@ namespace RainyLove
         public static string AudioFilePath = "";
         public static float ScanInterval = 0.25f;
         public static bool OnlyWhenSelfIsLast = false;
-        public static int ResampleHz = 44100;       // Retained for compatibility; unused in the WAV-only build.
+        public static int ResampleHz = 44100;       // Retained for compatibility; playback format follows the source file.
 
         // ===== AIZO =====
         public static bool AizoEnabled = true;
@@ -108,37 +112,44 @@ namespace RainyLove
             _settings.MenuKey = MenuKey;
         }
 
-        /// <summary>Resolve the absolute audio file path from config; fileName is rainylove.wav / AIZO.wav.
-        /// Falls back to PackageRoot/Asset then PackageRoot when the configured location is not found.</summary>
-        internal static string ResolveAudioPath(string fileName, out bool fileExists)
+        /// <summary>Resolve the absolute audio file path from config; baseName is "rainylove" / "AIZO" without an
+        /// extension. A configured path may be a file or a directory (see AudioFilePath / AizoAudioFilePath).
+        /// Falls back to PackageRoot/Asset then PackageRoot, trying .wav before .mp3.</summary>
+        internal static string ResolveAudioPath(string baseName, out bool fileExists)
         {
             fileExists = false;
-            if (string.IsNullOrEmpty(PackageRoot)) return fileName;
+            if (string.IsNullOrEmpty(PackageRoot)) return baseName + AudioExtensions[0];
 
-            string configuredKey = fileName == DefaultAizoWav ? AizoAudioFilePath : AudioFilePath;
+            string configuredKey = baseName == DefaultAizoBase ? AizoAudioFilePath : AudioFilePath;
             var configured = (configuredKey ?? string.Empty).Trim();
             if (!string.IsNullOrEmpty(configured))
             {
-                var direct = File.Exists(configured)
-                    ? configured
-                    : (Directory.Exists(configured) ? Path.Combine(configured, fileName) : null);
-                if (!string.IsNullOrEmpty(direct) && File.Exists(direct))
+                if (File.Exists(configured))
                 {
                     fileExists = true;
-                    return direct;
+                    return configured;
+                }
+                if (Directory.Exists(configured))
+                {
+                    foreach (var ext in AudioExtensions)
+                    {
+                        string p = Path.Combine(configured, baseName + ext);
+                        if (File.Exists(p)) { fileExists = true; return p; }
+                    }
                 }
             }
 
-            var candidates = new[]
+            foreach (var dir in new[] { Path.Combine(PackageRoot, "Asset"), PackageRoot })
             {
-                Path.Combine(PackageRoot, "Asset", fileName),
-                Path.Combine(PackageRoot, fileName),
-            };
-            foreach (var c in candidates)
-            {
-                if (File.Exists(c)) { fileExists = true; return c; }
+                foreach (var ext in AudioExtensions)
+                {
+                    string p = Path.Combine(dir, baseName + ext);
+                    if (File.Exists(p)) { fileExists = true; return p; }
+                }
             }
-            return candidates[0];
+
+            // Nothing found: report the most likely location so the warning names a concrete path.
+            return Path.Combine(PackageRoot, "Asset", baseName + AudioExtensions[0]);
         }
 
         // Settings DTO (instance) serialized to JSON. Newtonsoft maps the AudioPriority enum by name.

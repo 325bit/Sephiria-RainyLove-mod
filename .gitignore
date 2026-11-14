@@ -15,3 +15,4 @@ config.json
 
 # IDE caches (already tracked historically; kept as-is in the repo)
 /.vs/
+/docs/HANDOFF-PROMPT-wav-size.md

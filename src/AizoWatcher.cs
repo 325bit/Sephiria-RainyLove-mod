@@ -37,7 +37,9 @@ namespace RainyLove
         private const float MinLowSec = 0.75f;
 
         private float _scanTimer;
-        private string _wavPath;
+        private string _playPath;
+        private float _playVolume = 1f;
+        private bool _volumeBaked;     // True when the volume was baked into a temp WAV, so a volume change must reload
         private bool _audioReady;
         private bool _reloading;
         private bool _playAfterLoad;
@@ -52,11 +54,11 @@ namespace RainyLove
         public bool IsPlaying => AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.Aizo);
         public bool IsAudioReady => _audioReady;
 
-        /// <summary>Whether the rendered temporary WAV is still usable (the temp directory may be cleaned or the file removed elsewhere).
+        /// <summary>Whether the prepared audio is still usable (the temp directory may be cleaned or the file removed elsewhere).
         /// Use this instead of _audioReady alone, otherwise the UI shows 'ready' but clicking play produces no sound.</summary>
         private bool IsUsable => _audioReady
-                                 && !string.IsNullOrEmpty(_wavPath)
-                                 && System.IO.File.Exists(_wavPath);
+                                 && !string.IsNullOrEmpty(_playPath)
+                                 && System.IO.File.Exists(_playPath);
 
         public void Initialize()
         {
@@ -68,30 +70,32 @@ namespace RainyLove
             if (_reloading) yield break;
             _reloading = true;
             _audioReady = false;
-            _wavPath = null;
+            _playPath = null;
 
-            string path = ModConfig.ResolveAudioPath(ModConfig.DefaultAizoWav, out bool exists);
+            string path = ModConfig.ResolveAudioPath(ModConfig.DefaultAizoBase, out bool exists);
             if (!exists)
             {
-                Log.Warning("[rainylove][AIZO] 找不到音频文件（需要 AIZO.wav）：" + path +
+                Log.Warning("[rainylove][AIZO] 找不到音频文件（需要 AIZO.mp3 或 AIZO.wav）：" + path +
                                       "。请把文件放到 WorkshopLocal/rainylove/Asset/ 下");
                 _reloading = false;
                 yield break;
             }
 
-            // AIZO only applies volume scaling: fade-in/fade-out were removed; stopping is controlled by timeline nodes.
-            string wavPath;
-            if (AudioLoader.TryPrepareWav(path, ModConfig.AizoVolume, 0f, 0f, out wavPath))
+            // AIZO only applies volume; fade-in/fade-out were removed and stopping is controlled by timeline nodes.
+            if (AudioLoader.TryPrepareAudio(path, ModConfig.AizoVolume, out string playPath, out float playVolume))
             {
-                _wavPath = wavPath;
-                _sched.Duration = AudioLoader.GetWavDuration(wavPath);
+                _playPath = playPath;
+                _playVolume = playVolume;
+                _volumeBaked = !string.Equals(playPath, path, System.StringComparison.OrdinalIgnoreCase);
+                float duration = AudioLoader.GetAudioDuration(playPath);
+                _sched.Duration = duration;
                 _audioReady = true;
-                Log.Info("[rainylove][AIZO] 音频就绪（系统播放）：" + wavPath
-                                   + "，时长 " + PlaybackNodeScheduler.Fmt(AudioLoader.GetWavDuration(wavPath)));
+                Log.Info("[rainylove][AIZO] 音频就绪（系统播放）：" + playPath
+                                   + "，时长 " + PlaybackNodeScheduler.Fmt(duration));
             }
             else
             {
-                Log.Warning("[rainylove][AIZO] 音频准备失败：需要 AIZO.wav（或同目录 mp3 + ffmpeg 兜底）：" + path);
+                Log.Warning("[rainylove][AIZO] 音频准备失败：需要 AIZO.mp3 或 AIZO.wav：" + path);
             }
             _reloading = false;
 
@@ -103,8 +107,8 @@ namespace RainyLove
                 if (_audioReady)
                 {
                     _sched.Reset();
-                    if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _wavPath);
-                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _wavPath)) _triggered = true;
+                    if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _playPath, _playVolume);
+                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume)) _triggered = true;
                 }
             }
         }
@@ -267,7 +271,7 @@ namespace RainyLove
                 return;
             }
             _sched.Reset();
-            AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _wavPath);
+            AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _playPath, _playVolume);
         }
 
         /// <summary>Config UI 'Audio Playback Stop'.</summary>
@@ -285,13 +289,19 @@ namespace RainyLove
             }
         }
 
-        /// <summary>Volume changed: invalidate the rendered WAV so the next playback re-renders with new parameters. Interrupts auto playback only.</summary>
+        /// <summary>Volume changed: for MP3 the device applies the new volume on the next play, so nothing has to be
+        /// re-prepared; a volume-baked WAV copy does have to be re-rendered. Interrupts auto playback only.</summary>
         public void OnParamChanged()
         {
             _sched.Reset();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);
+            if (!_volumeBaked)
+            {
+                Log.Message("[rainylove][AIZO] 音量已更新，下次播放直接使用新音量。");
+                return;
+            }
             _audioReady = false;
-            _wavPath = null;
+            _playPath = null;
             Log.Message("[rainylove][AIZO] 音频参数已变更，下次播放按新参数重新渲染。");
         }
 
@@ -306,7 +316,7 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return false;
             }
-            bool ok = AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _wavPath);
+            bool ok = AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume);
             if (ok) _sched.Reset();     // A new playback starts, so reset the node schedule
             return ok;
         }

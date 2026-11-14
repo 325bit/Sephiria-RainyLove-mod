@@ -1,7 +1,7 @@
 # rainylove → Official Sephiria Steam Workshop: Migration Checklist
 
 > **Implementation status (2026-11-14): Plan A is complete; `dotnet build -c Release` passes with 0 errors.**
-> Entry point `Entry : WorkshopModBase`; configuration replaced with a self-contained JSON store (`ModConfig`); logging via `Log`; audio rewritten as WAV-only (removed ffmpeg / local HTTP server / UnityWebRequest / AudioClip reflection, keeping only pure C# WAV rendering + winmm `PlaySound`).
+> Entry point `Entry : WorkshopModBase`; configuration replaced with a self-contained JSON store (`ModConfig`); logging via `Log`; audio rewritten to drop ffmpeg / local HTTP server / UnityWebRequest / AudioClip reflection. Playback now goes through **winmm MCI** (`mciSendString`) since 1.4.3 — see §8.
 > Build output: `package/bin/RainyLove.dll`; `metadata.json` lives in `package/`. Outstanding runtime checks are listed in §4.
 >
 > **Corrections from real-world testing (evening of 2026-11-14)**
@@ -14,9 +14,9 @@
 > - In-game verification passed: after loading a save, the F7 panel works and both tracks play; the old bug where AIZO fired immediately on save load disappeared with the migration.
 > - The upload dialog reported (Korean) `미리보기 이미지 필요: 패키지 루트에 thumbnail.png를 두거나 info.preview로 지정 (1MB 미만 png/jpg)`
 >   = **a preview image is required**. Generated `thumbnail.png` from `Asset/牢师.png` by proportional downscaling (1024×470 / RGB PNG / 202KB, artwork untouched), placed it in the package root and declared it explicitly via `info.preview`; version bumped to **`1.4.2`** (editing metadata requires a version bump).
-> - **Next obstacle: package size.** Code mods under review require the whole folder to be **≤20MB compressed**, and "every file in the folder is subject to review". The current `WorkshopLocal/rainylove/` holds two WAVs totalling **83.6MB** (48kHz / 16-bit / stereo; PCM barely compresses) and will exceed the limit.
->   → **Temporarily move `Asset/*.wav` out of the mod folder before uploading**, then put them back for local testing afterwards; subscribers must supply their own WAVs.
-> - Before publishing: `thumbnail.png` (done), remove the WAVs (at upload time), remove `.pdb`/`.deps.json` (done).
+> - **Next obstacle: package size (RESOLVED in 1.4.3, see §8).** Code mods under review require the whole folder to be **≤20MB compressed**, and "every file in the folder is subject to review". The current `WorkshopLocal/rainylove/` holds two WAVs totalling **83.6MB** (48kHz / 16-bit / stereo; PCM barely compresses) and would exceed the limit.
+>   → 1.4.3 ships the two source **MP3s** instead (10.1MB total, playback through winmm MCI). Subscribers no longer have to supply their own files; a same-named `.wav` still overrides the packaged `.mp3`. §8 records the decision and the measurements behind it.
+> - Before publishing: `thumbnail.png` (done), remove `.pdb`/`.deps.json` (done). `package-upload/` is the clean upload tree: 10.30 MiB compressed, 51.5% of the limit.
 > See the original checklist below (architecture table, review checklist, risks, directory layout).
 
 > Goal: migrate rainylove from **BepInEx 5 + net472 (Mono)** to a **DLL module mod** (`WorkshopModBase`) supported by Sephiria's official Steam Workshop.
@@ -279,7 +279,81 @@ Build: `dotnet build -c Release` (outputs to `package/bin/`). Then sync `package
      - `[WorkshopModRuntime] ✓ [Active] rainylove ...` and `[rainylove] v1.4.2 已加载` present → the DLL is active and F7 should work.
      - **Only `[Planned]`, with no `[Active]` / `활성화 결과`** → that run never entered a world scene (even other subscribed DLL mods would not activate); not a problem with this mod.
      - `[rainylove] 输入自检失败：...` present → InputSystem reflection resolution failed; F7 cannot open, but auto playback is unaffected.
-4. Confirm `rainylove.wav` / `AIZO.wav` (16-bit PCM) are in `Asset/`; "audio ready" in the F7 panel means path resolution is fine. Trigger "last survivor" / "low health" to verify playback, then change volume to verify re-rendering.
+4. Confirm `rainylove.mp3` / `AIZO.mp3` (or a same-named `.wav` override) are in `Asset/`; "audio ready" in the F7 panel means path resolution is fine. Trigger "last survivor" / "low health" to verify playback, then change volume to verify the system volume takes effect.
 5. **Multiplayer testing cannot use WorkshopLocal**: the official `publishing.md` states a game with local Workshop mods loaded cannot play multiplayer. Upload the mod as Unlisted, remove the local folder, and test with the subscribed copy.
 6. Submit through the in-game "Upload to Workshop" button → wait for the review result and confirm no winmm / external-code warnings; under `local_only`, confirm other participants are not asked to install it.
 7. After approval, subscribe yourself and switch to Public; every later update must bump `version` and be re-uploaded.
+
+---
+
+## 8. Addendum (1.4.3): MP3 playback through winmm MCI
+
+### 8.1 Why the audio pipeline changed again
+
+PCM WAV cannot fit the 20MB limit: both tracks together are **79.68 MiB** at 48kHz/16-bit/stereo and ZIP level 9 only removes 1.9%. The only PCM shapes that fit are mono at ≤22.05kHz (18.30 MiB, 1.6MB of headroom) — an unacceptable quality drop for a music mod. The two source MP3s are already present and total **10.10 MiB**, so the question was only *how to decode them*.
+
+Decoder candidates, measured on the real files (reference: ffmpeg decode, correlation):
+
+| Candidate | Verdict |
+|---|---|
+| NLayer 1.16.0 (MIT, 72KB) | **Rejected.** Wrong output: correlation 0.066 (byte path) / −0.21 (float path), byte path even doubled the duration. |
+| NVorbis 0.10.5 (MS-PL, 81KB) | Decodes correctly (0.994) and is fast (262× realtime), but the netstandard2.0 build hard-references `System.Memory`, which `Sephiria_Data/Managed` does not contain → dependency chain too risky. |
+| MP3Sharp 1.0.4 (LGPL-3.0, 168KB, zero deps) | Decodes correctly (0.99999998 at a 2257-sample offset, i.e. the decoder's inherent delay) and was the runner-up, but adds a reviewed third-party binary plus a runtime temp-file render step. |
+| **winmm MCI (`mciSendString`)** | **Chosen.** No bundled decoder, no temp files, no CPU cost; the OS decodes MP3. |
+
+### 8.2 How it works
+
+- `SystemAudio` now calls `mciSendString("open \"<path>\" type mpegvideo alias <alias>")`, then `setaudio <alias> volume to 0..1000`, then `play <alias>`. Stops use `stop` + `close`.
+- **Single-device invariant.** MCI happily runs several aliases at once (verified: two MP3s reported `playing` simultaneously), and this mod must never sound two tracks together. `Play()` therefore always closes the previous device before opening the next one and tracks a single alias, so a second source can only *replace* the first. Verified: after `close`, `status <old alias> mode` fails with 263 (device no longer exists).
+- `AudioChannel.Play` only updates its state when playback really started, so a device error can no longer leave the source "occupied but silent".
+- **Volume:** the `mpegvideo` device accepts `setaudio volume` (verified: `status volume` round-trips 1000 → 0). The `waveaudio` device rejects it with 261 `MCIERR_UNSUPPORTED_FUNCTION`, so user-supplied WAVs keep the pure-C# render path that bakes the volume into a temp WAV.
+- **Duration:** MCI's own length query is unusable for MP3 (measured 674907 ms for a 219370 ms file, with or without `set time format milliseconds`), so `Mp3Duration` walks the frame headers (ID3v2 skip, MPEG-1/2/2.5 Layer III, CBR + VBR). Measured 219.432 s / 215.856 s vs. 219.371 s / 215.787 s from ffprobe — the delta is one header frame, irrelevant at node granularity.
+
+### 8.3 Measured MCI behaviour (Windows 10 22H2, 2026-11-14)
+
+| Case | Result |
+|---|---|
+| Path with spaces / Chinese characters / 152-char path | `open` + `play` all return 0 — the historical 128-char MCI command limit does not apply here |
+| Two aliases played at once | Both report `playing` → hence the close-before-open invariant |
+| Start latency | ≈101 ms (`play`, then 1.5 s sleep, `position` = 1399 ms) |
+| End of track | `status <alias> mode` → `stopped`; `play` again after `seek <alias> to start` works |
+| Missing file | 275 `找不到指定的文件`, surfaced through `mciGetErrorString` in the log |
+| Double `close` | 263 `设备未打开` — logged at info level, never thrown |
+
+### 8.4 STA is mandatory for the MP3 driver — do not "simplify" this away
+
+`open ... type mpegvideo` **only works on an STA thread**. On an MTA thread the MPEG video driver
+(`mciqtz32.dll`, which builds a DirectShow graph internally) fails with **266 `MCIERR_CANNOT_LOAD_DRIVER`** —
+a message that says nothing about apartments and looks exactly like "the system has no MP3 codec".
+
+How this was isolated:
+
+| Caller | Apartment | `open type mpegvideo` |
+|---|---|---|
+| Python (ctypes, uninitialised COM then STA) | STA | OK |
+| .NET console app, main thread | MTA (CLR default) | **266** |
+| .NET console app, `Thread.SetApartmentState(STA)` | STA | OK |
+| .NET console app, `CoInitializeEx(STA)` called *inside* the thread | MTA (too late) | **266** (returns `RPC_E_CHANGED_MODE` 0x80010106) |
+
+Two consequences baked into the code:
+
+1. The apartment must be set **before** the thread starts (`Thread.SetApartmentState`). A managed thread is
+   already MTA by the time its body runs, so calling `CoInitializeEx` inside the thread cannot fix it.
+2. All MCI commands run on one dedicated STA worker thread (`RainyLove.MciAudio`, background, FIFO queue).
+   This also removes the DirectShow device-open (~100 ms) from the game main thread, and it means the mod
+   does **not** depend on whatever apartment Unity chose for its main thread.
+
+If MP3 playback ever fails again with 266, check the log for
+`播放线程当前是 MTA（RPC_E_CHANGED_MODE）` first — that is the apartment problem, not a missing codec.
+
+### 8.5 Package layout (1.4.3)
+
+```
+package-upload/            10,842,484 B raw → 10,796,905 B compressed (51.5% of the 20MB limit)
+├── Asset/  README.txt, rainylove.mp3 (5,399,255), AIZO.mp3 (5,189,521)
+├── bin/    RainyLove.dll (45,568)
+├── metadata.json (1.4.3, no `libraries` entry — nothing to declare any more)
+└── thumbnail.png (206,700)
+```
+
+Known residual risk: playback depends on the OS MPEG/DirectShow components, which stripped Windows images (N/KN editions) may lack. A failure surfaces as `MCI 打开失败` in the log instead of silent breakage.

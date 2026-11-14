@@ -4,8 +4,9 @@ namespace RainyLove
 {
     /// <summary>
     /// Audio playback arbiter (singleton MonoBehaviour). All audio is ultimately played through it,
-    /// because winmm PlaySound is a process-wide single channel: only one sound can play at a time,
-    /// so 'who gets to play' must be decided by a single central authority.
+    /// and only one track may ever sound at a time - the mod's whole point is a single song for a single
+    /// moment, so 'who gets to play' must be decided by a single central authority. SystemAudio enforces the
+    /// same rule one level down by closing the previous MCI device before opening the next one.
     ///
     /// Two kinds of requests:
     ///   - Auto trigger (StartAuto): from RainyLove's 'last survivor' check or AIZO's 'low health' check.
@@ -13,7 +14,7 @@ namespace RainyLove
     ///   - Manual test (StartManual): from the config UI 'Test Play / Audio Playback Test' buttons.
     ///     An explicit user action: it always takes over the current sound immediately (highest priority).
     ///
-    /// winmm PlaySound is asynchronous and gives no completion callback, so a timer (_endTime) resets state after natural end;
+    /// MCI gives no completion callback either, so a timer (_endTime) resets state after natural end;
     /// otherwise an 'occupied' source would permanently block the other source's auto triggers.
     /// </summary>
     public enum AudioSourceKey { RainyLove, Aizo }
@@ -86,15 +87,11 @@ namespace RainyLove
         public float GetDuration(AudioSourceKey src) => _current == src ? _duration : 0f;
 
         /// <summary>Auto-trigger request. Returns true when playback actually started (the caller should set its 'triggered this run' flag to avoid repeats).</summary>
-        public bool StartAuto(AudioSourceKey src, string wavPath)
+        public bool StartAuto(AudioSourceKey src, string audioPath, float volume)
         {
-            if (string.IsNullOrEmpty(wavPath)) return false;
+            if (string.IsNullOrEmpty(audioPath)) return false;
 
-            if (_current == null)
-            {
-                Play(src, wavPath, false);
-                return true;
-            }
+            if (_current == null) return Play(src, audioPath, volume, false);
 
             // Manual playback in progress: manual always wins, auto never interrupts.
             if (_currentManual) return false;
@@ -102,8 +99,7 @@ namespace RainyLove
             // Auto vs auto: decided by priority.
             if (!ShouldTakeOver(src)) return false;
 
-            Play(src, wavPath, false);
-            return true;
+            return Play(src, audioPath, volume, false);
         }
 
         /// <summary>Caller's condition ended; stops this source's own auto playback (manual playback is unaffected).</summary>
@@ -121,10 +117,10 @@ namespace RainyLove
         }
 
         /// <summary>Config UI 'Test Play / Audio Playback Test': explicit user action, always takes over immediately.</summary>
-        public void StartManual(AudioSourceKey src, string wavPath)
+        public void StartManual(AudioSourceKey src, string audioPath, float volume)
         {
-            if (string.IsNullOrEmpty(wavPath)) return;
-            Play(src, wavPath, true);
+            if (string.IsNullOrEmpty(audioPath)) return;
+            Play(src, audioPath, volume, true);
         }
 
         /// <summary>Config UI 'Stop Playback / Audio Playback Stop': stops only this source's sound; does not affect the other source.</summary>
@@ -156,17 +152,23 @@ namespace RainyLove
             return src == AudioSourceKey.Aizo;                          // AizoFirst
         }
 
-        private void Play(AudioSourceKey src, string wavPath, bool manual)
+        /// <summary>Start playback through the system audio device. State is updated only when playback really
+        /// started, so a device error (missing codec, unreadable file) cannot leave the channel 'occupied but silent'.</summary>
+        private bool Play(AudioSourceKey src, string audioPath, float volume, bool manual)
         {
-            SystemAudio.Play(wavPath);
+            if (!SystemAudio.Play(audioPath, volume)) return false;
+
             _current = src;
             _currentManual = manual;
-            _currentWav = wavPath;
-            float dur = AudioLoader.GetWavDuration(wavPath);
+            _currentWav = audioPath;
+            float dur = AudioLoader.GetAudioDuration(audioPath);
             _duration = dur;
             _startTime = Time.unscaledTime;
             _endTime = dur > 0f ? Time.unscaledTime + dur : 0f;
-            Log.Message("[rainylove] 开始播放（" + src + (manual ? " · 手动测试" : " · 自动触发") + "）。");
+            Log.Message("[rainylove] 开始播放（" + src + (manual ? " · 手动测试" : " · 自动触发")
+                        + "，音量 " + volume.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
+                        + "，时长 " + PlaybackNodeScheduler.Fmt(dur) + "）。");
+            return true;
         }
     }
 }
