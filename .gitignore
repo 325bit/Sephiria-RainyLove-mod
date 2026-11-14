@@ -1,0 +1,17 @@
+# Build output (root only; package/bin and package-upload/bin are release artifacts and must stay visible)
+/bin/
+/obj/
+*.pdb
+*.deps.json
+
+# Player-supplied audio / reference images (~91MB, must NOT enter the Workshop upload package)
+/Asset/
+
+# Old DLL backups
+/dll backup/
+
+# Runtime-generated per-device settings
+config.json
+
+# IDE caches (already tracked historically; kept as-is in the repo)
+/.vs/

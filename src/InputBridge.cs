@@ -5,23 +5,23 @@ using System.Reflection;
 namespace RainyLove
 {
     /// <summary>
-    /// 键盘按键查询桥。
+    /// Keyboard key query bridge.
     ///
-    /// 本游戏的 Player Settings 把 Input Handling 切到了 Input System 包，此时调用旧的
-    /// UnityEngine.Input.GetKeyDown 会抛 InvalidOperationException。由于异常发生在 Update 里，
-    /// 会把同一帧后续的存活扫描一起打断，所以这里改成反射调用 Input System。
+    /// This game's Player Settings switch Input Handling to the Input System package; calling the legacy
+    /// UnityEngine.Input.GetKeyDown then throws InvalidOperationException. Because the exception occurs inside Update,
+    /// it also aborts the rest of that frame's survivor scan, so Input System is called via reflection instead.
     ///
-    /// 三个容易踩的点（均用 Mono.Cecil 核对过 Unity.InputSystem.dll 后确认）：
-    ///   1. Keyboard 上没有生成的 f7 之类的按键属性。整个 Keyboard 只有 9 个非按键属性，
-    ///      按键一律走索引器：Keyboard.current[Key.F7]。反射里索引器名为 "Item"。
-    ///   2. wasPressedThisFrame 定义在 ButtonControl 上，不是 Keyboard 上，
-    ///      必须按键控件的运行时类型（KeyControl -> ButtonControl）向上找。
-    ///      索引器返回的是 KeyControl（派生自 ButtonControl），所以能读到。
-    ///   3. 反射链的最后一步依赖运行时状态：Keyboard.current 在 Awake 阶段通常还是 null
-    ///      （Input 运行时要等第一帧才建设备）。此时必须判定为"设备未就绪"而不是"解析失败"，
-    ///      否则会在启动日志里产生一条误导性的 False。
+    /// Three easy-to-miss details (all verified against Unity.InputSystem.dll with Mono.Cecil):
+    ///   1. Keyboard has no generated key properties such as f7. It has only 9 non-key properties;
+    ///      keys always go through the indexer: Keyboard.current[Key.F7]. In reflection the indexer is named 'Item'.
+    ///   2. wasPressedThisFrame is defined on ButtonControl, not on Keyboard,
+    ///      so it must be found by walking up from the key control's runtime type (KeyControl -> ButtonControl).
+    ///      The indexer returns a KeyControl (derived from ButtonControl), so the property is reachable.
+    ///   3. The last step of the reflection chain depends on runtime state: Keyboard.current is usually still null during Awake
+    ///      (the Input runtime creates devices only after the first frame). That must be reported as 'device not ready', not 'resolution failed',
+    ///      otherwise the startup log gets a misleading False.
     ///
-    /// 全部调用都吞异常：输入系统有问题时只是 F7 失效，不影响核心的存活检测与播放。
+    /// All calls swallow exceptions: if the input system breaks, only F7 stops working; core survivor detection and playback are unaffected.
     /// </summary>
     internal static class InputBridge
     {
@@ -39,11 +39,11 @@ namespace RainyLove
         private static PropertyInfo _currentProperty;
         private static PropertyInfo _indexerProperty;
 
-        /// <summary>键名 -> Key 枚举值。只映射一次，热路径（每帧）只查 Dictionary。</summary>
+        /// <summary>Key name -> Key enum value. Mapped once; the hot path (every frame) only does a Dictionary lookup.</summary>
         private static readonly ConcurrentDictionary<string, object> KeyValueCache
             = new ConcurrentDictionary<string, object>();
 
-        /// <summary>按键控件类型 -> 按下状态的读取器，避免每帧在基类链上反复查找。</summary>
+        /// <summary>Key control type -> pressed-state reader, avoiding a base-class walk every frame.</summary>
         private static readonly ConcurrentDictionary<Type, Func<object, object>> PressedReaderCache
             = new ConcurrentDictionary<Type, Func<object, object>>();
 
@@ -51,12 +51,12 @@ namespace RainyLove
         private static bool _available;
         private static string _structureError;
 
-        // ---- 延迟自检状态 ----
+        // ---- Deferred self-check state ----
         private static bool _selfCheckScheduled;
         private static bool _selfCheckLogged;
         private static float _selfCheckElapsed;
 
-        /// <summary>API 层是否可用（不依赖设备是否在线）。</summary>
+        /// <summary>Whether the API layer is usable (independent of device availability).</summary>
         internal static bool Available
         {
             get { EnsureResolved(); return _available; }
@@ -70,7 +70,19 @@ namespace RainyLove
 
             try
             {
-                Assembly assembly = Assembly.Load("Unity.InputSystem");
+                // The official Workshop runtime resolves assemblies differently from BepInEx.
+                // Prefer the already-loaded Unity.InputSystem (the Input System is initialized by the game at boot),
+                // and only fall back to Assembly.Load when it is not present in the current AppDomain.
+                Assembly assembly = null;
+                foreach (Assembly loaded in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (string.Equals(loaded.GetName().Name, "Unity.InputSystem", StringComparison.Ordinal))
+                    {
+                        assembly = loaded;
+                        break;
+                    }
+                }
+                if (assembly == null) assembly = Assembly.Load("Unity.InputSystem");
                 if (assembly == null)
                 {
                     _structureError = "未找到 Unity.InputSystem 程序集";
@@ -108,7 +120,7 @@ namespace RainyLove
             }
         }
 
-        /// <summary>按参数类型找到 Key 枚举索引器（Keyboard 上通常同时存在 Key 和 string 两套）。</summary>
+        /// <summary>Find the Key enum indexer by parameter type (Keyboard usually has both Key and string overloads).</summary>
         private static PropertyInfo FindKeyIndexer()
         {
             foreach (PropertyInfo p in _keyboardType.GetProperties(InstanceFlags))
@@ -122,7 +134,7 @@ namespace RainyLove
             return null;
         }
 
-        /// <summary>把外部键名（如 "f7"）映射成 InputSystem.Key 枚举值。返回 false 表示枚举里没有这个键。</summary>
+        /// <summary>Map an external key name (e.g. 'f7') to an InputSystem.Key enum value. Returns false if the key is absent from the enum.</summary>
         internal static bool MapKey(string keyName)
         {
             if (string.IsNullOrEmpty(keyName)) return false;
@@ -143,20 +155,20 @@ namespace RainyLove
                     }
                 }
 
-                KeyValueCache[keyName] = null;   // 记住"映射失败"，避免每帧重试
-                Plugin.Log.LogWarning("[rainylove] 键名 " + keyName
+                KeyValueCache[keyName] = null;   // Remember a 'mapping failed' result so it is not retried every frame
+                Log.Warning("[rainylove] 键名 " + keyName
                                       + " 在 InputSystem.Key 里不存在，手动重播不生效（自动触发不受影响）。");
                 return false;
             }
             catch (Exception e)
             {
                 KeyValueCache[keyName] = null;
-                Plugin.Log.LogWarning("[rainylove] 键名 " + keyName + " 解析失败：" + e.Message);
+                Log.Warning("[rainylove] 键名 " + keyName + " 解析失败：" + e.Message);
                 return false;
             }
         }
 
-        /// <summary>键名是否已成功映射到 Key 枚举（不含设备是否在线）。</summary>
+        /// <summary>Whether the key name was successfully mapped to the Key enum (does not include device availability).</summary>
         internal static bool IsKeyMapped(string keyName)
         {
             if (!MapKey(keyName)) return false;
@@ -165,8 +177,8 @@ namespace RainyLove
         }
 
         /// <summary>
-        /// 运行时自检：此刻能否真正读到该键的按下状态。
-        /// reason 为 null 表示一切正常，否则为具体失败原因（用于日志诊断）。
+        /// Runtime self-check: whether the key's pressed state can actually be read right now.
+        /// A null reason means everything is fine; otherwise it holds the specific failure reason (for log diagnostics).
         /// </summary>
         internal static bool TryProbe(string keyName, out string reason)
         {
@@ -213,7 +225,7 @@ namespace RainyLove
             }
         }
 
-        /// <summary>查询某个键在本帧是否被按下。任何异常都返回 false。</summary>
+        /// <summary>Query whether a key was pressed this frame. Any exception returns false.</summary>
         internal static bool WasKeyPressedThisFrame(string keyName)
         {
             if (!Available) return false;
@@ -226,7 +238,7 @@ namespace RainyLove
                 if (!KeyValueCache.TryGetValue(keyName, out keyValue) || keyValue == null) return false;
 
                 object keyboard = _currentProperty.GetValue(null, null);
-                if (keyboard == null) return false;   // 无键盘设备 / 窗口无焦点
+                if (keyboard == null) return false;   // No keyboard device / window not focused
 
                 object control = _indexerProperty.GetValue(keyboard, new[] { keyValue });
                 if (control == null) return false;
@@ -241,8 +253,8 @@ namespace RainyLove
         }
 
         /// <summary>
-        /// 取按键控件的按下状态读取器（按控件类型缓存）：优先属性，其次 get_xxx() 方法。
-        /// 每个检查点都会重新解析，这样 Keyboard.current 换成新的设备实例后也能跟上。
+        /// Get the pressed-state reader for a key control (cached by control type): prefer a property, then a get_xxx() method.
+        /// Re-resolved at every checkpoint so a new Keyboard.current device instance is picked up.
         /// </summary>
         private static object ReadPressedState(object control)
         {
@@ -276,19 +288,29 @@ namespace RainyLove
         }
 
         /// <summary>
-        /// 每帧调用。启动后约 2 秒做一次自检并打一条日志：
-        /// Awake 阶段 Keyboard.current 通常还是 null，那时做判断必然失败，所以要等运行时就绪。
-        /// 自检只打一次，不刷屏。
+        /// Called every frame. Runs one self-check about 2 seconds after startup and logs a single line:
+        /// During Awake Keyboard.current is usually still null, so a check then would always fail; wait for the runtime to be ready.
+        /// The self-check logs once only, to avoid spam.
         /// </summary>
-        internal static void TickSelfCheck(string keyName, BepInEx.Logging.ManualLogSource log, float deltaTime)
+        internal static void TickSelfCheck(string keyName, float deltaTime)
         {
-            if (_selfCheckLogged || !Available) return;
+            if (_selfCheckLogged) return;
+
+            // Report an unusable API layer explicitly instead of silently returning: otherwise a broken
+            // Input System resolution looks identical to 'the mod never loaded' in the log.
+            if (!Available)
+            {
+                _selfCheckLogged = true;
+                Log.Warning("[rainylove] 输入自检失败：" + _structureError
+                               + "。F7 配置界面无法呼出，但存活检测与自动播放不受影响。");
+                return;
+            }
 
             if (!_selfCheckScheduled)
             {
                 _selfCheckScheduled = true;
                 _selfCheckElapsed = 0f;
-                return;             // 第一帧不计时，给 Input 运行时留出初始化时间
+                return;             // Do not start the timer on the first frame, giving the Input runtime time to initialize
             }
 
             _selfCheckElapsed += deltaTime;
@@ -299,11 +321,11 @@ namespace RainyLove
             string reason;
             if (TryProbe(keyName, out reason))
             {
-                log.LogInfo("[rainylove] 输入自检通过：F7 可正常读取（Input System 运行正常）。");
+                Log.Info("[rainylove] 输入自检通过：F7 可正常读取（Input System 运行正常）。");
             }
             else
             {
-                log.LogWarning("[rainylove] 输入自检失败：" + reason
+                Log.Warning("[rainylove] 输入自检失败：" + reason
                                + "。F7 手动重播不可用，但存活检测与自动播放不受影响。");
             }
         }

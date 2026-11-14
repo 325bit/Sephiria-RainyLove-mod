@@ -3,18 +3,18 @@ using UnityEngine;
 namespace RainyLove
 {
     /// <summary>
-    /// “节点顺延停止”调度器（AIZO 与 RainyLove 共用）。
+    /// 'Deferred stop at timeline node' scheduler (shared by AIZO and RainyLove).
     ///
-    /// 背景：触发条件（血量过低 / 只剩最后一人）变假时不该立刻掐掉音乐，
-    /// 而是向后顺延到音频时间轴上最近的下一个“节点”再停；淡入淡出已取消。
+    /// Background: when the trigger condition (low health / last survivor left) becomes false, the music should not be cut off immediately;
+    /// instead it is deferred to the next 'node' on the audio timeline; fade-in/out was removed.
     ///
-    /// 规则：
-    ///   1. 条件第一次变假 → 目标 = 严格晚于当前播放位置的第一个节点。
-    ///   2. 在目标节点前 windowSec 秒内条件又变真 → 目标顺延到下一个节点，
-    ///      并标记为“锁定”——锁定的目标不允许再被取消（否则下一帧就会因为
-    ///      “不在新目标的窗口内”而被取消，退化成永远不停）。
-    ///   3. 已经顺延到最后一个节点（曲末）还被触发 → 放完整首，不再安排停止。
-    ///   4. 条件在窗口之外变真 → 取消本次停止计划，继续正常播放，等下次变假再重排。
+    /// Rules:
+    ///   1. Condition becomes false for the first time -> target = first node strictly after the current playback position.
+    ///   2. Condition becomes true again within windowSec before the target node -> defer the target to the next node,
+    ///      and mark it as 'locked': a locked target can no longer be cancelled (otherwise the next frame
+    ///      would cancel it for being 'outside the new target's window', degenerating into never stopping).
+    ///   3. If it still triggers after deferring to the last node (end of track), play the whole track and schedule no stop.
+    ///   4. Condition becomes true outside the window -> cancel this stop plan, keep playing normally, and reschedule when it next becomes false.
     /// </summary>
     public class PlaybackNodeScheduler
     {
@@ -22,19 +22,19 @@ namespace RainyLove
         public const int StopNow = 1;
         public const int StopCancelled = 2;
 
-        private readonly float[] _checkpoints;   // 中间节点（秒），不含曲末
-        private readonly string[] _labels;       // 节点名，比 _checkpoints 多一项（最后一项是“曲末”）
+        private readonly float[] _checkpoints;   // Intermediate nodes (seconds), excluding the end of track
+        private readonly string[] _labels;       // Node labels, one more than _checkpoints (last entry is 'end of track')
         private readonly float _windowSec;
 
-        private int _stopNode = -1;     // 计划停止的节点索引；-1 = 暂无停止计划
-        private bool _locked;           // 目标由“窗口内顺延”产生，不允许被取消
-        private bool _playToEnd;        // 已决定放完整首
-        private bool _lastCondition;    // 最近一次扫描到的条件结果
-        private float _duration;        // 音频总时长（秒）
+        private int _stopNode = -1;     // Index of the scheduled stop node; -1 = no stop scheduled
+        private bool _locked;           // Target produced by an in-window deferral; must not be cancelled
+        private bool _playToEnd;        // Decided to play the whole track
+        private bool _lastCondition;    // Condition result from the most recent scan
+        private float _duration;        // Total audio duration (seconds)
 
-        /// <param name="checkpoints">中间节点（秒，递增），不含曲末。</param>
-        /// <param name="labels">节点名，长度 = checkpoints.Length + 1，最后一项为曲末。</param>
-        /// <param name="windowSec">距目标节点前多少秒内条件再次满足就顺延。</param>
+        /// <param name="checkpoints">Intermediate nodes in seconds, ascending, excluding the end of track.</param>
+        /// <param name="labels">Node labels, length = checkpoints.Length + 1, last entry is the end of track.</param>
+        /// <param name="windowSec">How many seconds before the target node a re-trigger defers the stop.</param>
         public PlaybackNodeScheduler(float[] checkpoints, string[] labels, float windowSec)
         {
             _checkpoints = checkpoints;
@@ -42,13 +42,13 @@ namespace RainyLove
             _windowSec = windowSec;
         }
 
-        /// <summary>是否已排好“到某个节点就停”。</summary>
+        /// <summary>Whether a 'stop at node' is scheduled.</summary>
         public bool HasPlan => _stopNode >= 0;
 
-        /// <summary>设置音频总时长（曲末节点用它）。</summary>
+        /// <summary>Set the total audio duration (used by the end-of-track node).</summary>
         public float Duration { set { _duration = value; } }
 
-        /// <summary>清空一次播放的节点计划。</summary>
+        /// <summary>Clear the node schedule for one playback.</summary>
         public void Reset()
         {
             _stopNode = -1;
@@ -57,7 +57,7 @@ namespace RainyLove
             _lastCondition = false;
         }
 
-        private int EndNode => _checkpoints.Length;      // 虚拟节点索引：曲末
+        private int EndNode => _checkpoints.Length;      // Virtual node index: end of track
 
         public float NodeTime(int index)
         {
@@ -73,7 +73,7 @@ namespace RainyLove
             return _labels[_labels.Length - 1];
         }
 
-        /// <summary>严格晚于 elapsed 的最近节点；没有就返回 EndNode（曲末）。</summary>
+        /// <summary>Nearest node strictly after elapsed; returns EndNode (end of track) if none exists.</summary>
         private int NextNodeIndex(float elapsed)
         {
             for (int i = 0; i < _checkpoints.Length; i++)
@@ -84,14 +84,14 @@ namespace RainyLove
             return EndNode;
         }
 
-        /// <summary>每 0.25s 的条件扫描。返回要打的日志文本；无变化返回 null。</summary>
+        /// <summary>Condition scan every 0.25s. Returns the log text to emit, or null when nothing changed.</summary>
         public string OnScan(bool conditionMet, float elapsed)
         {
             _lastCondition = conditionMet;
 
             if (conditionMet)
             {
-                if (_stopNode < 0) return null;                  // 本来就打算放到底
+                if (_stopNode < 0) return null;                  // Already planning to play to the end
 
                 float target = NodeTime(_stopNode);
                 if (elapsed >= target - _windowSec)
@@ -115,7 +115,7 @@ namespace RainyLove
                 return null;
             }
 
-            if (_playToEnd || _stopNode >= 0) return null;       // 已在放到底 / 目标已排好
+            if (_playToEnd || _stopNode >= 0) return null;       // Already playing to the end / target already scheduled
 
             int node = NextNodeIndex(elapsed);
             if (node >= EndNode)
@@ -128,8 +128,8 @@ namespace RainyLove
             return Fmt(elapsed) + " 条件解除 → 顺延至 " + NodeLabel(node) + " 结束播放";
         }
 
-        /// <summary>每帧调用（避免 0.25s 扫描过冲）。
-        /// 返回 NoStop / StopNow / StopCancelled；后两者附带一条日志文本。</summary>
+        /// <summary>Called every frame (to avoid overshoot from the 0.25s scan).
+        /// Returns NoStop / StopNow / StopCancelled; the latter two carry a log message.</summary>
         public int CheckStop(float elapsed, out string message)
         {
             message = null;
@@ -138,7 +138,7 @@ namespace RainyLove
 
             if (_lastCondition)
             {
-                // 刚好到节点时条件又满足了：不硬停，否则复位后会立刻从头重播。
+                // Condition is met again exactly at the node: do not hard-stop, otherwise it would immediately replay from the start after reset.
                 message = "到达 " + NodeLabel(_stopNode) + " 时条件再次满足，取消本次停止，继续播放";
                 _stopNode = -1;
                 _locked = false;

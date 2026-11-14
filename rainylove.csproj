@@ -1,34 +1,28 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net472</TargetFramework>
+    <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>RainyLove</AssemblyName>
     <RootNamespace>RainyLove</RootNamespace>
-    <LangVersion>latest</LangVersion>
+    <LangVersion>9.0</LangVersion>
     <Nullable>disable</Nullable>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <OutputPath>package\bin\</OutputPath>
     <GameDir Condition="'$(GameDir)' == ''">F:\SteamLibrary\steamapps\common\Sephiria</GameDir>
-    <ModRoot Condition="'$(ModRoot)' == ''">D:\workplace\Sephiria\mods\rainylove</ModRoot>
-    <DeployMod Condition="'$(DeployMod)' == ''">false</DeployMod>
-    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="BepInEx">
-      <HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <!-- All source lives in src/. Declared explicitly so a stray .cs under docs/ or samples/
+         can never be pulled into the mod assembly by the SDK's recursive default glob. -->
+    <Compile Include="src/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Game assemblies: referenced for compilation, NEVER copied into the package (Private=false).
+         Copying them would load two copies of the same assembly and is rejected by the Workshop review. -->
     <Reference Include="Assembly-CSharp">
       <HintPath>$(GameDir)\Sephiria_Data\Managed\Assembly-CSharp.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine">
-      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
@@ -43,23 +37,16 @@
       <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- PlayerAvatar derives from Mirror's NetworkBehaviour, so it must be referenced (not copied). -->
     <Reference Include="Mirror">
       <HintPath>$(GameDir)\Sephiria_Data\Managed\Mirror.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>$(GameDir)\Sephiria_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+    <!-- Newtonsoft.Json ships with the game; reference without copying. -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(GameDir)\Sephiria_Data\Managed\Newtonsoft.Json.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
-
-  <!-- -p:DeployMod=true 时，编译完自动把 dll 部署到游戏的 BepInEx/plugins/rainylove -->
-  <Target Name="DeployMod" AfterTargets="Build" Condition="'$(DeployMod)' == 'true'">
-    <ItemGroup>
-      <DeployFiles Include="$(TargetDir)$(AssemblyName).dll" />
-    </ItemGroup>
-    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(GameDir)\BepInEx\plugins\rainylove" />
-    <Message Importance="high" Text="已部署：$(GameDir)\BepInEx\plugins\rainylove\$(AssemblyName).dll" />
-  </Target>
 
 </Project>
