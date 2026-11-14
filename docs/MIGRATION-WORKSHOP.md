@@ -559,3 +559,203 @@ Verified by `D:/tmp/cfgtest`, which compiles the unmodified `src/ModConfig.cs` a
 `Log`, with the real `Newtonsoft.Json` from `Sephiria_Data/Managed`: 26 checks covering a fresh install, legacy
 migration (including that `DeferStop: true` survives), save/load round-trip, the fallback path, both-files-present
 precedence, and the literal target path above.
+
+---
+
+## 13. Addendum (1.4.7): AIZO keeps playing through a mini-boss / boss fight
+
+New AIZO option `ModConfig.AizoBossHold` (panel label 「BOSS 战期间保持播放（战后按顺延设置停止）」, **off by default**).
+While a Miniboss or Boss is alive, AIZO must not stop for any reason, and a track that reaches its end repeats;
+once the fight is over the existing `DeferStop` policy applies again (immediate stop, or defer to the next timeline
+node). Starting still needs the health trigger — the hold only extends playback, it never forces a start.
+
+### 13.1 Why the detector does not use `BossSpawner.IsBossBattleInProgress`
+
+That property looks perfect and is a trap:
+
+```csharp
+public bool IsBossBattleInProgress => battlePhase == EBattlePhase.BeginBattle;   // BossSpawner.cs:202
+```
+
+`battlePhase` is only written inside `BossSpawner.Update()` under `if (base.isServer)`, and the client-side RPC body
+is just `ClientOpenBossHPBar()` (`BossSpawner.cs:1537`). It is therefore true on the host and **permanently false on
+every client** — using it would repeat the 1.4.5 failure where AIZO only reacted on the host (§9.1).
+
+What *is* replicated: `UnitAvatar.monsterType` and `UnitAvatar.IsDead` are both `[SyncVar]`. `EMonsterType` is
+exactly `{ Normal, Miniboss, Boss, Dummy }`, so:
+
+> a fight is ongoing while at least one living `UnitAvatar` has `monsterType == Miniboss || monsterType == Boss`.
+
+Both kinds are spawned by the room the player entered and lock the player inside via the spawner's `playerPrevent`
+SyncVar, so a living boss cannot belong to some other room. `Dummy` (training target) is excluded.
+
+### 13.2 Hysteresis: `BossFightLogic`
+
+`src/BossFightLogic.cs` holds the decision with no Unity types (so a console harness can drive it):
+
+| Transition | Rule |
+|---|---|
+| boss appears | `Active` becomes true **immediately** |
+| boss disappears | `Active` stays true for `EndGraceSec = 1.5s` of continuous absence, then goes false |
+| boss reappears inside the grace window | countdown resets, `Active` never flickers |
+
+The grace exists because the raw signal drops out between summon waves and the instant the boss dies — the victory
+cut-scene and rewards are still running then. Ending the hold on that first false frame would cut the music in the
+middle of the death animation. `BossFightWatcher` scans `Object.FindObjectsOfType<UnitAvatar>()` every 0.5s
+(`ScanSec`) and is driven from `AizoWatcher.Update`.
+
+### 13.3 Loop: MCI `repeat`, measured
+
+`SystemAudio.PlayOnWorker` now issues `play <alias> repeat` when a loop is requested. Measured on the real AIZO.mp3
+(mpegvideo), repeating the first 3 seconds:
+
+```
+play rep1 repeat from 0 to 3000 -> ok
+    t=1.0s pos=906ms   t=3.0s pos=1338ms   t=5.0s pos=160ms   mode=playing throughout
+stop -> ok
+```
+
+The position wraps inside the range and the device keeps playing, so the loop is gapless — no close/open, unlike
+restarting from the mod. `waveaudio` rejects the flag with **259 / MCIERR_UNSUPPORTED_FUNCTION**, so a WAV (still
+reachable through the legacy `.wav` override) falls back to a single-shot playback plus a warning; only MP3 loops.
+This is one more reason the WAV path is being retired (§ appendix of the feasibility note).
+
+### 13.4 Timeline nodes inside a loop
+
+While looping, `Time.unscaledTime - _startTime` runs past the track length forever, so `AudioChannel.GetElapsedSeconds`
+asks the device instead: `set <alias> time format milliseconds` at open, then `status <alias> position`, cached for
+0.1s (a per-frame MCI round-trip is not free, and `TickScheduledStop` runs every frame while a plan exists). The
+returned value is the position **inside the current repetition**, which is exactly what `PlaybackNodeScheduler`
+needs — that class is unchanged.
+
+### 13.5 State machine
+
+`hold = AizoBossHold && BossFightWatcher.Active`, plus a latch (`_holdLatch`) that records "this fight is why the
+music is on":
+
+| Situation | Result |
+|---|---|
+| hold, auto-playing | no stop at all; node schedule cleared every scan |
+| hold, not playing, latch set (track ended) | restart with loop |
+| hold, not playing, no latch, health low | normal trigger applies (starts with loop) |
+| hold, not playing, no latch, health fine | stays silent — the hold never forces a start |
+| hold ends, health fine, `DeferStop` off | stop immediately |
+| hold ends, health fine, `DeferStop` on | defer to the next node, computed from the in-loop position |
+| hold ends, health still low | keep playing (the trigger condition still holds) |
+| UI 「音频播放停止」 or a volume change | latch cleared, so the hold cannot resurrect it |
+| scene change | `StopAll` + `ResetRunState` (which also calls `BossFightWatcher.Reset`) |
+
+One deliberate gap: a track that was already sounding *before* the fight cannot be converted to looping in place
+(MCI has no "add repeat to a running device"), so that first repetition plays to its end and only the restart is
+looping. Restarting it on fight start would cut the song at an arbitrary point, which is worse.
+
+### 13.6 Verification
+
+- `D:/tmp/bossfight` — 41 checks on `BossFightLogic` + `BossFightWatcher`: every `EMonsterType`, dead-corpse
+  filtering, null entries, the 1.5s grace, wave-gap flicker, the 0.5s scan throttle, full timelines, and the
+  injectable `Source` seam.
+- `D:/tmp/aizohold` — 36 checks compiling the unmodified `AizoWatcher` + `AudioChannel` + `PlaybackNodeScheduler`:
+  the eleven rows of §13.5, including "replay after the track ends", "started before the fight", "manual stop is
+  not resurrected" and "no forced start at full health".
+- `D:/tmp/rlworld` — 35 checks (the 25 from 1.4.6 plus 10 for the loop plumbing: no self-extinguishing end timer,
+  device-sourced position, modulo fallback, driver-rejected loop).
+- `D:/tmp/gtest` — 19 checks, unchanged.
+
+## 14. Fix (1.4.8): the boss hold never released
+
+1.4.7 shipped the hold with a detector that answered the wrong question. `AnyBossAlive()` asked "does any
+living `UnitAvatar` with `monsterType` Miniboss/Boss exist in the loaded scene", not "is the player fighting
+one". Dungeon floors pre-spawn their rooms, so a boss waiting in a room the player has not entered yet
+already satisfied it; combined with the fact that nothing reset that state at a run or floor boundary, the
+hold engaged on save load and stayed engaged for the whole run, which made every stop path in
+`AizoWatcher.Evaluate` unreachable. Reported symptom: after killing a boss, HP back above the threshold,
+AIZO still would not stop while clearing normal rooms.
+
+`Player.log` for 1.4.7 proves it without any new instrumentation: exactly one `检测到小BOSS/BOSS` line
+(taken at save load, one frame *before* `avatar=new`) and exactly one `BOSS 战结束` line (~19 minutes and
+11 floors later), while the loop start at 1256 requires `BossFightWatcher.Active == true` at that moment.
+Any intermediate false→true transition would have logged, so `Active` was true continuously.
+
+### 14.1 New rule
+
+`BossFightLogic.IsBossEngaged(isBossType, isDead, inBattle, sqrDistance, engageRadiusSqr)`:
+
+```
+isBossType && !isDead && (inBattle || distance <= 12)
+```
+
+- `inBattle` is `UnitAvatar.IsInBattle`, a SyncVar. `UnitAI_NewBasic.OnFoundTarget` calls
+  `Avatar.StartBattle()` as soon as the AI has a hostile target, and `UnitAI_BossBasic : UnitAI_NewBasic`
+  does not override `OnFoundTarget`/`OnLostTarget`, so this is the engine's own "this boss is fighting"
+  flag and it is visible on clients (unlike `BossSpawner.IsBossBattleInProgress`, which is host-only).
+- `12` is copied from the game: `UnitAI_NewBasic` treats `distance > 12` as "the target walked into another
+  room, stop chasing", so 12 is its room radius. It only covers the entry window, where the boss is already
+  spawned in the room but its AI has not picked a target yet.
+- A local player must exist, so the world-load window (before the first `PlayerAvatar` spawns) can no
+  longer report a fight.
+
+### 14.2 Boundary resets
+
+- `LastSurvivorWatcher.LeaveRun()` now also calls `Entry.Aizo?.ResetRunState()`. It used to reset only its
+  own component, so `AizoWatcher._holdLatch` and `BossFightWatcher` survived "left the dungeon" and
+  "nobody is in the run". `AudioChannel.OnActiveSceneChanged` already reset both on a world swap; this
+  covers the two paths that never swap the scene.
+- `AizoWatcher.Evaluate()` clears `_holdLatch` / `_holdLogged` when `FindSelf()` returns null, because a
+  missing local avatar means no fight can be keeping the track alive.
+
+### 14.3 Detection log carries its own evidence
+
+The enter transition now logs `unit=<name> type=<type> inBattle=<bool> dist=<distance>`. This is permanent,
+not a temporary probe: if the detector ever misfires again, the log names the offending unit.
+
+### 14.4 Verification
+
+- `D:/tmp/bossfight` grew from 41 to 61 checks: the engagement truth table, 1.4.7 regressions (boss 40 units
+  away in an unentered room, boss 13 units away in the next room -> not engaged), the entry window
+  (11.9 units, no target -> engaged), distance-independent `inBattle`, dead/dummy/normal filtering, "no
+  local player -> never engaged", and `Reset` interrupting an active hold.
+- `docs/DEBUG-aizo-boss-hold.md` holds the full Chinese debug report: causal chain, hypothesis table with
+  exclusions, and the acceptance protocol to read on the next run.
+
+## 15. Fix (1.4.9): the player avatar is itself a `Boss`
+
+§14's diagnosis was incomplete. Excluding pre-spawned rooms and requiring a local player was not enough,
+because the local player *was* the match. 1.4.8's detector log named it on the user's very next run:
+
+```
+检测到小BOSS/BOSS → 战斗期间不停止播放，播完自动重播。
+   （unit=PlayerAvatar [connId=0] type=Boss inBattle=False dist=0.0）
+```
+
+`PlayerAvatar : UnitAvatar` (`PlayerAvatar.cs:11`), and `monsterType` is a **prefab-serialized field** - no
+code in the assembly ever assigns `EMonsterType.Boss`, so the value comes from the player prefab itself.
+The player therefore satisfied "a living Miniboss/Boss unit exists" at distance 0 for the entire run, the
+hold latched on spawn and never released, and every stop path in `AizoWatcher.Evaluate` stayed unreachable.
+
+The game guards the same way: `UI_EnemyViewer.cs:112` does
+`if (!(obj is PlayerAvatar) && obj.monsterType == EMonsterType.Normal)` before trusting `monsterType`.
+
+### 15.1 Rule change
+
+`BossFightWatcher.AnyBossEngaged()` now skips, in this order:
+
+1. `u is PlayerAvatar` - the local player and every teammate;
+2. `u.NetworkLeader is PlayerAvatar` - player-owned followers / summons, which are on the player's side
+   and can legitimately carry a Miniboss `monsterType`;
+3. anything whose `monsterType` is not Miniboss/Boss, or that is dead.
+
+Everything else from §14.1 still applies: `inBattle || distance <= 12`, and a local player must exist.
+
+### 15.2 Why the 1.4.8 test suite missed it
+
+The harness stub declared `PlayerAvatar` as a standalone class that never appeared in the `UnitAvatar` scan
+list, so the one shape that mattered could not be expressed. The stub now mirrors the real inheritance
+(`PlayerAvatar : UnitAvatar`) and `bossfight` grew from 61 to 69 checks, including a dedicated group:
+player with `monsterType=Boss` at distance 0 -> not engaged, player in battle -> not engaged, teammate ->
+not engaged, player follower with `monsterType=Miniboss` -> not engaged, real boss -> engaged and reported
+by name.
+
+### 15.3 Lesson recorded in the memory file
+
+Before trusting `monsterType` on any `UnitAvatar`, exclude `PlayerAvatar` (and player-owned units). This is
+the same filter the game itself uses.

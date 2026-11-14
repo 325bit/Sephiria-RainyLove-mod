@@ -33,7 +33,8 @@ namespace RainyLove
 
             Log.Info("[rainylove] v" + metadata.modVersion + " 已加载，RainyLove=" + ModConfig.Enabled
                      + " AIZO=" + ModConfig.AizoEnabled + " 优先级=" + ModConfig.AudioPriority
-                     + " 顺延播放=" + ModConfig.DeferStop);
+                     + " 顺延播放=" + ModConfig.DeferStop
+                     + " BOSS战保持=" + ModConfig.AizoBossHold);
             Log.Info("[rainylove] 呼出配置界面按键=" + ModConfig.MenuKey.ToUpperInvariant()
                      + "，输入系统可用=" + InputBridge.Available
                      + "，按键映射=" + InputBridge.IsKeyMapped(ModConfig.MenuKey));

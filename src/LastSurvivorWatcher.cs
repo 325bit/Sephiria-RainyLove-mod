@@ -241,6 +241,11 @@ namespace RainyLove
         private void LeaveRun(string why)
         {
             ResetRunState();
+            // Also clear AIZO's per-run state. This path used to reset only this component, so AizoWatcher's boss
+            // hold latch and BossFightWatcher survived a run boundary: the hold stayed engaged after the boss died
+            // and AIZO ignored the health threshold for the rest of the session. AudioChannel's scene hook does the
+            // same on a world swap; this covers the paths that never swap the scene.
+            Entry.Aizo?.ResetRunState();
             AudioChannel.Instance?.StopAll(why);
             if (_leftRunLogged) return;
             _leftRunLogged = true;

@@ -36,6 +36,11 @@ namespace RainyLove
         private string _currentWav;         // Path of the audible file (logged when stopping, so the log names the track)
         private float _startTime;           // Unscaled start time of current playback (used to compute elapsed seconds)
         private float _duration;            // Total duration of the current audio (seconds)
+        private bool _loop;                 // Device-level 'repeat' is active, so the track never reaches its end
+        private float _posCache;            // Cached in-track position while looping (MCI round-trips are not free)
+        private float _posStamp;            // Unscaled time of the last position refresh
+
+        private const float PositionCacheSec = 0.1f;
 
         private void Awake()
         {
@@ -97,18 +102,36 @@ namespace RainyLove
             Log.Message("[rainylove] 停止播放（" + src + "）：" + (reason ?? "全部停止") + "。");
         }
 
-        /// <summary>Elapsed seconds for this source; returns -1 when this source is not playing.</summary>
+        /// <summary>Elapsed seconds for this source; returns -1 when this source is not playing.
+        /// While the track loops, the wall clock runs past the track length, so the position inside the current
+        /// repetition is read back from the device instead (this is what the timeline-node stop policy needs).</summary>
         public float GetElapsedSeconds(AudioSourceKey src)
         {
             if (_current != src || _startTime <= 0f) return -1f;
-            return Time.unscaledTime - _startTime;
+            if (!_loop) return Time.unscaledTime - _startTime;
+
+            if (_posStamp <= 0f || Time.unscaledTime - _posStamp >= PositionCacheSec)
+            {
+                _posStamp = Time.unscaledTime;
+                _posCache = SystemAudio.GetPositionSeconds();
+            }
+            if (_posCache >= 0f) return _posCache;
+
+            // Device did not answer: fall back to the wall clock folded into one repetition.
+            return _duration > 0f
+                ? (Time.unscaledTime - _startTime) % _duration
+                : Time.unscaledTime - _startTime;
         }
+
+        /// <summary>Whether this source is currently repeating at the device level.</summary>
+        public bool IsLooping(AudioSourceKey src) => _current == src && _loop;
 
         /// <summary>Total duration of this source's current audio (seconds); returns 0 when unknown.</summary>
         public float GetDuration(AudioSourceKey src) => _current == src ? _duration : 0f;
 
-        /// <summary>Auto-trigger request. Returns true when playback actually started (the caller should set its 'triggered this run' flag to avoid repeats).</summary>
-        public bool StartAuto(AudioSourceKey src, string audioPath, float volume)
+        /// <summary>Auto-trigger request. Returns true when playback actually started (the caller should set its 'triggered this run' flag to avoid repeats).
+        /// loop is only honoured when the driver supports it (MP3/mpegvideo does); otherwise playback is single-shot.</summary>
+        public bool StartAuto(AudioSourceKey src, string audioPath, float volume, bool loop = false)
         {
             if (string.IsNullOrEmpty(audioPath)) return false;
 
@@ -118,7 +141,7 @@ namespace RainyLove
             // track would jump back to 0:00 and never reach its end.
             if (_current == src && !_currentManual) return true;
 
-            if (_current == null) return Play(src, audioPath, volume, false);
+            if (_current == null) return Play(src, audioPath, volume, false, loop);
 
             // Manual playback in progress: manual always wins, auto never interrupts.
             if (_currentManual) return false;
@@ -126,7 +149,7 @@ namespace RainyLove
             // Auto vs auto: decided by priority.
             if (!ShouldTakeOver(src)) return false;
 
-            return Play(src, audioPath, volume, false);
+            return Play(src, audioPath, volume, false, loop);
         }
 
         /// <summary>Caller's condition ended; stops this source's own auto playback (manual playback is unaffected).</summary>
@@ -144,7 +167,7 @@ namespace RainyLove
         public void StartManual(AudioSourceKey src, string audioPath, float volume)
         {
             if (string.IsNullOrEmpty(audioPath)) return;
-            Play(src, audioPath, volume, true);
+            Play(src, audioPath, volume, true, false);
         }
 
         /// <summary>Config UI 'Stop Playback / Audio Playback Stop': stops only this source's sound; does not affect the other source.</summary>
@@ -173,10 +196,11 @@ namespace RainyLove
         }
 
         /// <summary>Start playback through the system audio device. State is updated only when playback really
-        /// started, so a device error (missing codec, unreadable file) cannot leave the channel 'occupied but silent'.</summary>
-        private bool Play(AudioSourceKey src, string audioPath, float volume, bool manual)
+        /// started, so a device error (missing codec, unreadable file) cannot leave the channel 'occupied but silent'.
+        /// A looping playback has no natural end, so its end timer stays disabled.</summary>
+        private bool Play(AudioSourceKey src, string audioPath, float volume, bool manual, bool loop)
         {
-            if (!SystemAudio.Play(audioPath, volume)) return false;
+            if (!SystemAudio.Play(audioPath, volume, loop)) return false;
 
             _current = src;
             _currentManual = manual;
@@ -184,8 +208,12 @@ namespace RainyLove
             float dur = AudioLoader.GetAudioDuration(audioPath);
             _duration = dur;
             _startTime = Time.unscaledTime;
-            _endTime = dur > 0f ? Time.unscaledTime + dur : 0f;
+            _loop = loop && SystemAudio.LastPlayLooped;
+            _posCache = -1f;
+            _posStamp = 0f;
+            _endTime = (!_loop && dur > 0f) ? Time.unscaledTime + dur : 0f;
             Log.Message("[rainylove] 开始播放（" + src + (manual ? " · 手动测试" : " · 自动触发")
+                        + (_loop ? " · 循环" : "")
                         + "，音量 " + volume.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                         + "，时长 " + PlaybackNodeScheduler.Fmt(dur) + "）。");
             return true;
@@ -199,6 +227,9 @@ namespace RainyLove
             _currentWav = null;
             _startTime = 0f;
             _duration = 0f;
+            _loop = false;
+            _posCache = -1f;
+            _posStamp = 0f;
         }
     }
 }

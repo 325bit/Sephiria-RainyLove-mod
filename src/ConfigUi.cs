@@ -251,24 +251,33 @@ namespace RainyLove
             SliderRow(242f, 268f, "开始播放的血量固定值", Mathf.RoundToInt(ModConfig.AizoHealthValue).ToString(),
                 ModConfig.AizoHealthValue, 0f, 100f, 1f, v => ModConfig.AizoHealthValue = Mathf.Round(v));
 
-            GUI.Label(new Rect(24f, 308f, WindowWidth - 48f, 22f),
+            GUI.Label(new Rect(24f, 296f, WindowWidth - 48f, 22f),
                 ModConfig.DeferStop
                     ? "顺延播放：血量回升到阈值以上时继续播到时间轴节点再停"
                     : "顺延播放关闭：血量回升到阈值以上时立即停止", _small);
 
-            Fill(new Rect(24f, 340f, WindowWidth - 48f, 1f), UiBorder);
+            // Boss-fight hold: no stop at all while a Miniboss/Boss is alive, and the track repeats.
+            GUI.Label(new Rect(24f, 322f, 400f, 32f), "BOSS 战期间保持播放（战后按顺延设置停止）", _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 322f, 112f, 32f), ModConfig.AizoBossHold))
+                ModConfig.AizoBossHold = !ModConfig.AizoBossHold;
+            GUI.Label(new Rect(24f, 358f, WindowWidth - 48f, 22f),
+                ModConfig.AizoBossHold
+                    ? "已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播；战斗结束后按顺延播放设置停止"
+                    : "已关闭：只看血量阈值决定何时停止（需要 MP3，WAV 不支持循环）", _small);
+
+            Fill(new Rect(24f, 396f, WindowWidth - 48f, 1f), UiBorder);
 
             AizoWatcher aizo = Entry.Aizo;
-            DrawStatus(366f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
+            DrawStatus(404f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
 
             bool aizoOn = ModConfig.AizoEnabled;
             bool disabled = !aizoOn;
             GUI.enabled = !disabled;
-            if (Button(new Rect(24f, 404f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
-            if (Button(new Rect(186f, 404f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
+            if (Button(new Rect(24f, 442f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
+            if (Button(new Rect(186f, 442f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 404f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 442f, 120f, 36f), "完成", true)) SetVisible(false);
         }
 
         // ---- Main Settings tab ----

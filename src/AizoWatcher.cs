@@ -20,6 +20,12 @@ namespace RainyLove
     ///
     /// Health field names vary between builds, so reflection probes PlayerAvatar for current / max / direct-percentage fields by candidate name.
     /// The resolved MemberInfo is cached and logged so the correct field can be verified.
+    ///
+    /// Boss hold (ModConfig.AizoBossHold, off by default): while BossFightWatcher reports a living Miniboss/Boss,
+    /// nothing stops the track - not the health condition, not DeferStop, not the node schedule - and playback is
+    /// started with device-level MCI 'repeat' so a finished track keeps sounding. When the fight ends the normal
+    /// DeferStop policy takes over again. Starting still requires the health trigger: the hold only extends, it
+    /// never forces a start.
     /// </summary>
     public class AizoWatcher : MonoBehaviour
     {
@@ -45,6 +51,8 @@ namespace RainyLove
         private bool _playAfterLoad;
         private bool _manualAfterLoad;
         private bool _triggered;       // Already triggered during this low-health interval; prevents repeated triggering
+        private bool _holdLatch;       // A boss fight is the reason the music is on; keep it alive until the fight ends
+        private bool _holdLogged;      // Transition log guard for the boss hold
 
         private PlayerAvatar _lastSelf;     // Local player avatar seen on the previous scan
         private float _selfReadyAt;         // Time after which the current avatar may participate in health evaluation
@@ -108,7 +116,10 @@ namespace RainyLove
                 {
                     _sched.Reset();
                     if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _playPath, _playVolume);
-                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume)) _triggered = true;
+                    else if (AudioChannel.Instance != null
+                             && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume,
+                                                                ModConfig.AizoBossHold && BossFightWatcher.Active))
+                        _triggered = true;
                 }
             }
         }
@@ -118,9 +129,13 @@ namespace RainyLove
             if (!ModConfig.AizoEnabled)
             {
                 _sched.Reset();
+                _holdLatch = false;
                 AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);   // Disabling stops auto playback only; manual test playback is unaffected
                 return;
             }
+
+            // Keep the boss-fight detector warm for the whole session (it throttles itself to one scan per 0.5s).
+            BossFightWatcher.Tick();
 
             // 'Stop at node' is checked every frame to avoid overshoot from the 0.25s scan interval.
             TickScheduledStop();
@@ -146,9 +161,12 @@ namespace RainyLove
         {
             _sched.Reset();
             _triggered = false;
+            _holdLatch = false;
+            _holdLogged = false;
             _lowSince = -1f;
             _lastSelf = null;
             _selfReadyAt = 0f;
+            BossFightWatcher.Reset();
         }
 
         private void Evaluate()
@@ -158,6 +176,11 @@ namespace RainyLove
             {
                 _lastSelf = null;
                 _lowSince = -1f;
+                // No local avatar means no boss fight can be keeping the track alive. Clearing the latch here also
+                // covers the case where the avatar disappears (death, world teardown) while the hold was engaged -
+                // otherwise the latch would survive into the next life and skip every stop path again.
+                _holdLatch = false;
+                _holdLogged = false;
                 return;
             }
 
@@ -210,6 +233,39 @@ namespace RainyLove
             AudioChannel ch = AudioChannel.Instance;
             bool autoPlaying = ch != null && ch.IsPlaying(AudioSourceKey.Aizo)
                                && !ch.IsManualPlaying(AudioSourceKey.Aizo);
+
+            // ---- BOSS / mini-boss hold (ModConfig.AizoBossHold) ----
+            // While a boss fight lasts AIZO must not stop: the health condition, the defer switch and the node
+            // schedule are all irrelevant until it ends. Playback is started with device-level 'repeat', so a track
+            // that reaches its end keeps sounding instead of leaving a gap.
+            // The latch records that this fight is what keeps the music on, so a track that was started *before*
+            // the fight (and therefore is not looping yet) is restarted when it ends rather than left silent.
+            // Starting still requires the normal low-health trigger - we only extend, never force a start.
+            bool hold = ModConfig.AizoBossHold && BossFightWatcher.Active;
+            if (hold)
+            {
+                if (autoPlaying) _holdLatch = true;
+                if (_holdLatch)
+                {
+                    _sched.Reset();
+                    if (!autoPlaying && AutoPlay())
+                        Log.Message("[rainylove][AIZO] BOSS 战中续播（上一轮已播完）。");
+                    if (!_holdLogged)
+                    {
+                        _holdLogged = true;
+                        Log.Message("[rainylove][AIZO] BOSS 战中 → 不停止播放"
+                                    + (ch != null && ch.IsLooping(AudioSourceKey.Aizo) ? "（循环中，播完自动重播）" : "（下一轮起循环）")
+                                    + "。");
+                    }
+                    return;
+                }
+            }
+            else if (_holdLatch)
+            {
+                _holdLatch = false;
+                _holdLogged = false;
+                Log.Message("[rainylove][AIZO] 已退出 BOSS 战保持 → 恢复常规停止逻辑。");
+            }
 
             if (!autoPlaying)
             {
@@ -295,9 +351,12 @@ namespace RainyLove
             AudioChannel.Instance?.StartManual(AudioSourceKey.Aizo, _playPath, _playVolume);
         }
 
-        /// <summary>Config UI 'Audio Playback Stop'.</summary>
+        /// <summary>Config UI 'Audio Playback Stop'. An explicit stop also cancels the boss-fight hold for this
+        /// encounter, otherwise the hold would immediately restart the track the user just silenced.</summary>
         public void StopFromUi()
         {
+            _holdLatch = false;
+            _holdLogged = false;
             if (AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.Aizo))
             {
                 _sched.Reset();
@@ -315,6 +374,8 @@ namespace RainyLove
         public void OnParamChanged()
         {
             _sched.Reset();
+            _holdLatch = false;         // the volume change stops playback, so the hold must not resurrect it
+            _holdLogged = false;
             AudioChannel.Instance?.StopAuto(AudioSourceKey.Aizo);
             if (!_volumeBaked)
             {
@@ -337,7 +398,9 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return false;
             }
-            bool ok = AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume);
+            bool loop = ModConfig.AizoBossHold && BossFightWatcher.Active;
+            bool ok = AudioChannel.Instance != null
+                      && AudioChannel.Instance.StartAuto(AudioSourceKey.Aizo, _playPath, _playVolume, loop);
             if (ok) _sched.Reset();     // A new playback starts, so reset the node schedule
             return ok;
         }

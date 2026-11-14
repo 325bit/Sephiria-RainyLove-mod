@@ -48,6 +48,14 @@ namespace RainyLove
         public static float AizoHealthPercent = 30f; // 0~99 (%)
         public static float AizoHealthValue = 30f;    // 0~9999 (fixed value)
 
+        /// <summary>Keep AIZO playing for the whole duration of a mini-boss / boss fight.
+        /// true  = while a Miniboss/Boss is alive, AIZO never stops (regardless of health and of DeferStop) and the
+        ///         track repeats when it reaches its end; once the fight is over the normal DeferStop policy applies.
+        /// false = current behaviour (1.4.6): the health condition alone decides when to stop.
+        /// Off by default: this deliberately makes the music refuse to stop, and a default-on behaviour reads to
+        /// players as the 'music never stops' bug they already reported.</summary>
+        public static bool AizoBossHold = false;
+
         // ===== Main =====
         public static AudioPriority AudioPriority = AudioPriority.RainyLoveFirst;
         public static string MenuKey = "f7";
@@ -166,6 +174,7 @@ namespace RainyLove
             AizoAudioFilePath = _settings.AizoAudioFilePath ?? "";
             AizoHealthPercent = _settings.AizoHealthPercent;
             AizoHealthValue = _settings.AizoHealthValue;
+            AizoBossHold = _settings.AizoBossHold;
             AudioPriority = _settings.AudioPriority;
             MenuKey = _settings.MenuKey ?? "f7";
             DeferStop = _settings.DeferStop;
@@ -184,6 +193,7 @@ namespace RainyLove
             _settings.AizoAudioFilePath = AizoAudioFilePath;
             _settings.AizoHealthPercent = AizoHealthPercent;
             _settings.AizoHealthValue = AizoHealthValue;
+            _settings.AizoBossHold = AizoBossHold;
             _settings.AudioPriority = AudioPriority;
             _settings.MenuKey = MenuKey;
             _settings.DeferStop = DeferStop;
@@ -243,6 +253,7 @@ namespace RainyLove
             public string AizoAudioFilePath = "";
             public float AizoHealthPercent = 30f;
             public float AizoHealthValue = 30f;
+            public bool AizoBossHold = false;
             public AudioPriority AudioPriority = AudioPriority.RainyLoveFirst;
             public string MenuKey = "f7";
             public bool DeferStop = false;

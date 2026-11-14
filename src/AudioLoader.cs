@@ -365,12 +365,29 @@ namespace RainyLove
         private static string _alias;   // Alias of the open device; owned by the worker thread
 
         /// <summary>Open and start playback. Any previous sound is stopped first, so two tracks can never overlap.
+        /// When loop is true the device is asked to repeat forever ('play alias repeat'), which restarts the file
+        /// without a close/open gap; LastPlayLooped reports whether the driver accepted it.
         /// Returns false when the device could not be opened or playback did not start.</summary>
-        public static bool Play(string audioPath, float volume)
+        public static bool Play(string audioPath, float volume, bool loop = false)
         {
             bool ok = false;
-            RunOnWorker(() => { ok = PlayOnWorker(audioPath, volume); });
+            RunOnWorker(() => { ok = PlayOnWorker(audioPath, volume, loop); });
             return ok;
+        }
+
+        /// <summary>Whether the most recent Play() achieved device-level looping. The mpegvideo (MP3) driver honours
+        /// the 'repeat' flag; the waveaudio driver rejects it with MCIERR_UNSUPPORTED_FUNCTION (259), so a WAV falls
+        /// back to a single-shot playback. Written on the audio thread, read from the main thread only after the
+        /// enqueueing call has returned.</summary>
+        public static bool LastPlayLooped { get; private set; }
+
+        /// <summary>Position inside the file in seconds, or -1 when no device is open. While looping this is the
+        /// position within the current repetition, which is what the timeline-node stop policy needs.</summary>
+        public static float GetPositionSeconds()
+        {
+            float pos = -1f;
+            RunOnWorker(() => { pos = PositionOnWorker(); });
+            return pos;
         }
 
         /// <summary>Stop and release the current device. Closing (not just stopping) is what guarantees the next
@@ -467,10 +484,11 @@ namespace RainyLove
             }
         }
 
-        private static bool PlayOnWorker(string audioPath, float volume)
+        private static bool PlayOnWorker(string audioPath, float volume, bool loop)
         {
             // Enforce the single-device invariant before touching the new file.
             CloseDevice();
+            LastPlayLooped = false;
 
             if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
             {
@@ -491,6 +509,11 @@ namespace RainyLove
 
             _alias = alias;
 
+            // Position queries (used by the loop + timeline-node stop policy) need a stable unit.
+            int trc = Send("set " + alias + " time format milliseconds");
+            if (trc != 0)
+                Log.Warning("[rainylove] MCI 设置时间格式失败：" + Describe(trc));
+
             // The waveaudio device rejects setaudio (MCIERR_UNSUPPORTED_FUNCTION); WAV volume is baked instead.
             if (device == "mpegvideo")
             {
@@ -501,7 +524,19 @@ namespace RainyLove
                     Log.Warning("[rainylove] MCI 设置音量失败（" + level + "）：" + Describe(vrc));
             }
 
-            rc = Send("play " + alias);
+            rc = Send("play " + alias + (loop ? " repeat" : ""));
+            if (rc != 0 && loop)
+            {
+                // Only the mpegvideo driver supports 'repeat'. A WAV (or a bitten driver) still has to make a
+                // sound, so retry once without the flag and let the channel fall back to single-shot playback.
+                Log.Warning("[rainylove] 系统音频不支持循环播放（仅 MP3 支持）：" + Describe(rc) + "，本次按单次播放。");
+                rc = Send("play " + alias);
+            }
+            else if (loop)
+            {
+                LastPlayLooped = true;
+            }
+
             if (rc != 0)
             {
                 Log.Warning("[rainylove] MCI 播放失败：" + Describe(rc) + " → " + audioPath);
@@ -509,8 +544,29 @@ namespace RainyLove
                 return false;
             }
 
-            Log.Info("[rainylove] 系统音频播放已发起：" + audioPath);
+            Log.Info("[rainylove] 系统音频播放已发起" + (LastPlayLooped ? "（循环）" : "") + "：" + audioPath);
             return true;
+        }
+
+        /// <summary>Read the current position from the device. Runs on the audio thread, so it needs its own reply
+        /// buffer (Send() discards the text).</summary>
+        private static float PositionOnWorker()
+        {
+            if (_alias == null) return -1f;
+            try
+            {
+                var reply = new StringBuilder(256);
+                int rc = mciSendString("status " + _alias + " position", reply, reply.Capacity, IntPtr.Zero);
+                if (rc != 0) return -1f;
+                if (!int.TryParse(reply.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int ms))
+                    return -1f;
+                return ms / 1000f;
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[rainylove] MCI 读取播放位置异常：" + e.GetType().Name + " - " + e.Message);
+                return -1f;
+            }
         }
 
         private static void StopOnWorker(string audioPath)
