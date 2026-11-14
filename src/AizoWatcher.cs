@@ -11,12 +11,12 @@ namespace RainyLove
     /// A threshold of 0 disables that condition (it can never be met).
     /// Playback still goes through AudioChannel arbitration; the config UI 'Audio Playback Test / Stop' uses the manual channel.
     ///
-    /// Stop policy (node deferral, no fade-out):
-    /// The AIZO timeline is split into 'nodes'. When health recovers and playback should stop, it is deferred to the next node instead of stopping immediately:
-    ///     p1 = 00:00 (start) / p2 = 00:43.5 / p3 = 01:38 / p4 = 02:20 / p5 = end of track
-    /// Example: full health at 01:00 -> keep playing until 01:38 (p3), then stop.
-    /// If health drops below either threshold again within NodeWindowSec (10s) before the target node, defer to the following node;
-    /// if it also triggers in the p4 (02:20) window, play the whole track (p5).
+    /// Stop policy is switchable (ModConfig.DeferStop):
+    ///   false (default) - stop the moment health is back above both thresholds;
+    ///   true            - defer to the next node: AIZO timeline p1 = 00:00 / p2 = 00:43.5 / p3 = 01:38 / p4 = 02:20 /
+    ///                     p5 = end of track. Example: full health at 01:00 -> keeps playing until 01:38 (p3).
+    ///                     Re-triggering within NodeWindowSec (10s) before the target node defers to the following node;
+    ///                     re-triggering in the p4 (02:20) window plays the whole track.
     ///
     /// Health field names vary between builds, so reflection probes PlayerAvatar for current / max / direct-percentage fields by candidate name.
     /// The resolved MemberInfo is cached and logged so the correct field can be verified.
@@ -140,6 +140,17 @@ namespace RainyLove
             AudioChannel.Instance?.StopManual(AudioSourceKey.Aizo);
         }
 
+        /// <summary>Clear the per-run state when the run ends (left the dungeon, back to the title screen, world swap).
+        /// The next world then re-runs the settle window instead of inheriting this avatar's low-health latch.</summary>
+        public void ResetRunState()
+        {
+            _sched.Reset();
+            _triggered = false;
+            _lowSince = -1f;
+            _lastSelf = null;
+            _selfReadyAt = 0f;
+        }
+
         private void Evaluate()
         {
             PlayerAvatar self = FindSelf();
@@ -215,6 +226,19 @@ namespace RainyLove
                 return;
             }
 
+            // Immediate-stop mode (DeferStop off): health back above both thresholds silences AIZO on the next scan.
+            // No node plan is created, so nothing can keep the track running to its end.
+            if (!ModConfig.DeferStop)
+            {
+                _sched.Reset();
+                if (!low)
+                {
+                    ch.StopAuto(AudioSourceKey.Aizo);
+                    Log.Message("[rainylove][AIZO] 血量回到阈值以上（顺延播放已关闭）→ 立即停止播放。");
+                }
+                return;
+            }
+
             float elapsed = ch.GetElapsedSeconds(AudioSourceKey.Aizo);
             if (elapsed < 0f) { _sched.Reset(); return; }
 
@@ -249,12 +273,9 @@ namespace RainyLove
 
         private PlayerAvatar FindSelf()
         {
-            PlayerAvatar[] avatars = UnityEngine.Object.FindObjectsOfType<PlayerAvatar>(true);
-            foreach (PlayerAvatar a in avatars)
-            {
-                if (a.authority) return a;   // authority marks the local player
-            }
-            return null;
+            // Never use 'authority' here: on a host it is true for every avatar and on a pure client for none,
+            // which made AIZO play on the host using a teammate's health and never play on clients. See PlayerLocator.
+            return PlayerLocator.GetLocal();
         }
 
         // ===================== Playback controls called by the config UI =====================

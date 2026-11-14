@@ -83,7 +83,7 @@ namespace RainyLove
                 ModConfig.Save();
                 RestoreGameInput();
                 RestoreCursor();
-                Log.Message("[rainylove] 配置界面已关闭，设置已写入 cfg。");
+                Log.Message("[rainylove] 配置界面已关闭，设置已写入 " + ModConfig.ConfigPath);
             }
         }
 
@@ -216,7 +216,9 @@ namespace RainyLove
                 ModConfig.Volume, 0f, 1f, 0.05f, v => { ModConfig.Volume = Mathf.Round(v * 100f) / 100f; if (Entry.Watcher != null) Entry.Watcher.OnParamChanged(); });
 
             GUI.Label(new Rect(24f, 190f, WindowWidth - 48f, 22f),
-                "当不再是最后一名存活者时在节点处自动停止播放", _small);
+                ModConfig.DeferStop
+                    ? "顺延播放：不再是最后一名存活者时继续播到时间轴节点再停"
+                    : "顺延播放关闭：不再是最后一名存活者时立即停止", _small);
 
             Fill(new Rect(24f, 222f, WindowWidth - 48f, 1f), UiBorder);
 
@@ -233,7 +235,8 @@ namespace RainyLove
             if (Button(new Rect(WindowWidth - 144f, 286f, 120f, 36f), "完成", true)) SetVisible(false);
 
             GUI.Label(new Rect(24f, 336f, WindowWidth - 48f, 24f),
-                "RainyLove 仅剩最后一名存活者时播放；条件解除后顺延到时间轴节点再停止。启用开关在主设置里。", _small);
+                "RainyLove 仅剩最后一名存活者时播放；顺延播放：" + (ModConfig.DeferStop ? "开启（到节点再停）" : "关闭（条件解除立即停）")
+                + "。开关在主设置里。", _small);
         }
 
         // ---- AIZO tab ----
@@ -249,7 +252,9 @@ namespace RainyLove
                 ModConfig.AizoHealthValue, 0f, 100f, 1f, v => ModConfig.AizoHealthValue = Mathf.Round(v));
 
             GUI.Label(new Rect(24f, 308f, WindowWidth - 48f, 22f),
-                "当血量回升到阈值以上时在节点处自动停止播放", _small);
+                ModConfig.DeferStop
+                    ? "顺延播放：血量回升到阈值以上时继续播到时间轴节点再停"
+                    : "顺延播放关闭：血量回升到阈值以上时立即停止", _small);
 
             Fill(new Rect(24f, 340f, WindowWidth - 48f, 1f), UiBorder);
 
@@ -272,23 +277,30 @@ namespace RainyLove
             GUI.Label(new Rect(24f, 124f, 400f, 32f), "启用 RainyLove（最后存活者播放）", _body);
             if (Toggle(new Rect(WindowWidth - 136f, 124f, 112f, 32f), ModConfig.Enabled)) ModConfig.Enabled = !ModConfig.Enabled;
 
-            GUI.Label(new Rect(24f, 178f, 400f, 32f), "启用 AIZO（血量过低播放）", _body);
-            if (Toggle(new Rect(WindowWidth - 136f, 178f, 112f, 32f), ModConfig.AizoEnabled)) ModConfig.AizoEnabled = !ModConfig.AizoEnabled;
+            GUI.Label(new Rect(24f, 172f, 400f, 32f), "启用 AIZO（血量过低播放）", _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 172f, 112f, 32f), ModConfig.AizoEnabled)) ModConfig.AizoEnabled = !ModConfig.AizoEnabled;
 
-            Fill(new Rect(24f, 224f, WindowWidth - 48f, 1f), UiBorder);
+            GUI.Label(new Rect(24f, 220f, 400f, 32f), "顺延播放（到时间轴节点再停）", _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 220f, 112f, 32f), ModConfig.DeferStop)) ModConfig.DeferStop = !ModConfig.DeferStop;
+            GUI.Label(new Rect(24f, 254f, WindowWidth - 48f, 22f),
+                ModConfig.DeferStop
+                    ? "已开启：条件解除后不停，继续播到下一个节点（最晚可播完整首）"
+                    : "已关闭：条件解除立即停（救起队友 / 血量回到阈值以上）", _small);
 
-            GUI.Label(new Rect(24f, 244f, 500f, 26f), "音频播放优先级（两者同时想播时）", _body);
-            PrioritySelector(278f);
+            Fill(new Rect(24f, 284f, WindowWidth - 48f, 1f), UiBorder);
+
+            GUI.Label(new Rect(24f, 300f, 500f, 26f), "音频播放优先级（两者同时想播时）", _body);
+            PrioritySelector(332f);
 
             // Status: whether the two sources are playing
             bool rlPlaying = Entry.Watcher != null && Entry.Watcher.IsPlaying;
             bool aizoPlaying = Entry.Aizo != null && Entry.Aizo.IsPlaying;
-            GUI.Label(new Rect(24f, 344f, 320f, 24f),
+            GUI.Label(new Rect(24f, 384f, 320f, 24f),
                 "RainyLove：" + (rlPlaying ? "● 播放中" : "○ 未播放"), rlPlaying ? _okRight : _small);
-            GUI.Label(new Rect(24f, 372f, 320f, 24f),
+            GUI.Label(new Rect(24f, 410f, 320f, 24f),
                 "AIZO：" + (aizoPlaying ? "● 播放中" : "○ 未播放"), aizoPlaying ? _okRight : _small);
 
-            if (Button(new Rect(WindowWidth - 144f, 412f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 448f, 120f, 36f), "完成", true)) SetVisible(false);
         }
 
         private void PrioritySelector(float y)

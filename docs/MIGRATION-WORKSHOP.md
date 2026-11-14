@@ -237,8 +237,10 @@ Sephiria/
         ├── thumbnail.png           ← preview image (<1MB)
         ├── bin/
         │   └── RainyLove.dll       ← build output (entryClass = RainyLove.Entry)
-        ├── Asset/                  ← user-supplied rainylove.wav / AIZO.wav (not packaged)
-        └── config.json             ← generated at runtime by Plan A (may ship as defaults)
+        ├── Asset/                  ← shipped rainylove.mp3 / AIZO.mp3 (+ optional .wav overrides)
+        ├── config.json             ← legacy location only; since §12 the live file is in
+        │                              %USERPROFILE%\AppData\LocalLow\TEAMHORAY\Sephiria\rainylove\
+        └── uploadticket.json       ← keep it, it carries publishedFileId (see §11)
 ```
 
 ### 6.2 Source repository (after the 2026-11-14 reorganisation)
@@ -357,3 +359,203 @@ package-upload/            10,842,484 B raw → 10,796,905 B compressed (51.5% o
 ```
 
 Known residual risk: playback depends on the OS MPEG/DirectShow components, which stripped Windows images (N/KN editions) may lack. A failure surfaces as `MCI 打开失败` in the log instead of silent breakage.
+
+## 9. Addendum (1.4.5): local-player resolution and a switchable stop policy
+
+### 9.1 `authority` is not "am I the local player" in this build
+
+`NetworkBehaviour.authority` is overridden in the shipped Mirror build (`NetworkBehaviour:48-69`):
+
+| Caller | `syncDirection == ServerToClient` (the default for `hp`, `IsDead`, `isInDungeon`) |
+|---|---|
+| host | `true` for **every** avatar |
+| client | `false` for **every** avatar |
+
+Consequences observed in multiplayer, both from the same one-line bug (`foreach (a) if (a.authority) return a`):
+
+- **host**: the first avatar in `FindObjectsOfType` order wins — usually a teammate — so AIZO played on the
+  host using a teammate's health.
+- **client**: no avatar matches, `FindSelf()` returns null, `Evaluate()` returns on its first line, so AIZO never
+  played on the client at all.
+
+`PlayerLocator.GetLocal()` replaces it with an explicit fallback chain:
+
+1. `NetworkClient.localPlayer` → `GetComponent<PlayerAvatar>()` (Mirror's own entry point, correct on host and client)
+2. `NetworkBehaviour.isLocalPlayer` (what the game itself uses: `avatar.cs:3713`)
+3. `NetworkBehaviour.isOwned`
+4. the single avatar in the scene (offline play / not yet spawned)
+
+Do not "simplify" this back to `authority`. `LastSurvivorWatcher` used it as well, for the
+`OnlyWhenSelfIsLast` option: that option was permanently false on clients and permanently true on hosts.
+
+### 9.2 Stop policy is now a switch: `ModConfig.DeferStop`
+
+Both watchers share the flag (Main Settings tab, `顺延播放（到时间轴节点再停）`):
+
+| | condition ends → behaviour | worst case |
+|---|---|---|
+| `false` (default) | hard stop on the next scan (≤ `ScanInterval`, 0.25 s) | track length as heard = time until the condition ended |
+| `true` | defer to the next timeline node (`PlaybackNodeScheduler`) | **the whole track** (219 s for RainyLove) |
+
+The option is labelled 顺延播放, not 顺延停止: it is described by what it adds (a delayed playback tail) rather than by
+what it postpones, because 顺延停止 read as "delay the stop" and players could not tell whether the switch meant
+"stop later" or "do not stop". The C# field keeps the name `DeferStop` -- it doubles as the `config.json` key, and
+renaming it would silently reset the setting for every existing user.
+
+The deferral behaviour is what players reported as "the music never stops", and it is reachable in three ways,
+all measured with the real scheduler in a frame-by-frame simulator:
+
+| condition ends at | stop point |
+|---|---|
+| 10 s | 87.1 s (p2) |
+| 90 s | 130.07 s (p3) — 43 s of unwanted tail |
+| 131 s | end of track, 219.4 s |
+| re-trigger inside the p2 window, then ends again | 130.07 s |
+| re-trigger inside the p2 **and** p3 windows | end of track, 219.4 s |
+
+That is why `DeferStop` defaults to `false`. Turn it on only when the musical tail is wanted more than
+predictability.
+
+### 9.3 `StartAuto` is idempotent for the already-playing source
+
+`AudioChannel.StartAuto` now returns `true` without calling `Play()` when the same source is already auto-playing.
+Before this, any upper-layer re-evaluation (the `_playedThisRun` / `_triggered` flag being cleared while the music
+was still sounding) re-entered `Play()` → `SystemAudio.Play()` → `CloseDevice()` + `open`, which seeks back to 0:00
+(measured: 3 s in, position 2908 ms; after close+reopen, 720 ms at 0.8 s). The track then never reaches its end.
+`LastSurvivorWatcher.AutoPlay()` also returns `bool` now, so the flag is latched only when playback really started
+(previously a request rejected by the priority arbitration still marked the run as "already played").
+
+Out of scope for 1.4.5, deliberately: `AizoWatcher.Evaluate` still returns early when the local player's hp reads
+`<= 0` (death while AIZO plays keeps it sounding to the end), short user-supplied audio (<131 s) skips every node,
+and a zero-length duration leaves `_endTime == 0` so the natural-end timer never fires. None of these can happen
+with the packaged MP3s; all three only matter when a player drops their own short/odd file into `Asset/`.
+
+## 10. Addendum (1.4.6): a song must not outlive the run
+
+Three behaviour fixes reported from multiplayer play. No new dependencies, no change to the manifest.
+
+### 10.1 Leaving the world stops the sound (`AudioChannel.OnActiveSceneChanged`)
+
+The sound is played by `mciSendString`, i.e. by a Windows device that lives outside Unity's scene graph. Neither
+scene unload nor `DontDestroyOnLoad` teardown closes it, so a track started inside a dungeon kept sounding after
+the player returned to the title screen or the lobby. The only previous stop paths were `OnModUnloaded` (not raised
+on that transition) and the natural-end timer.
+
+`AudioChannel` now subscribes to `SceneManager.activeSceneChanged` and calls `StopAll(...)` when anything is still
+sounding. Entering a world fires the same event, but nothing is playing at that moment, hence the early return.
+Both watchers get `ResetRunState()` so the next world does not inherit the previous run's flags.
+
+### 10.2 An empty dungeon ends the run (`LastSurvivorWatcher.Evaluate`)
+
+`inDungeonTotal == 0` used to feed `false` into the node scheduler, i.e. it *scheduled* a stop instead of ending the
+run. With deferral on, that plan could outlive the dungeon entirely - the exact shape of the report "it never
+stops". It now calls `LeaveRun`, which drops the plan, silences the channel (both sources, manual playback
+included) and clears the run state, so re-entering can trigger again.
+
+Debounce: the empty condition must persist `EmptyGraceSec` (0.5 s, i.e. two scans) before it is acted on. A level
+or scene transition reports zero players for a frame or two, and acting on the first frame would cut the track
+during normal play. Two independent timers are used - `_emptySince` for "nobody inside the dungeon" (avatars still
+exist, everyone is in the lobby) and `_noAvatarSince` for "no avatar at all" (title screen, world teardown) - so the
+two conditions cannot reset each other's debounce.
+
+### 10.3 Stop logs name the track
+
+`SystemAudio.Stop(null)` used to produce `系统音频已中断：` with an empty tail, which made the log useless for
+telling the two songs apart. Every stop path now passes `_currentWav`, and `AudioChannel.StopAll` additionally logs
+`停止播放（<source>）：<reason>`.
+
+### 10.4 Verified with a harness that compiles the real sources
+
+`D:/tmp/rlworld` compiles the unmodified `src/AudioChannel.cs`, `src/LastSurvivorWatcher.cs` and
+`src/PlaybackNodeScheduler.cs` against stubs, and drives `Evaluate()` directly: 25 checks, all pass, covering the
+scene-change stop, the 0.5 s debounce (0.0 s / 0.3 s / 0.6 s), plan cancellation on leaving, re-trigger in a new
+run, manual playback being stopped on leave, and the no-avatar path. The 1.4.5 idempotence suite (`D:/tmp/gtest`)
+still passes.
+
+Note for future work: `WorkshopVerification.IsGateActive()` returns false because `ModGuardWorkshop.EnforceGate`
+has no assignment anywhere in `Assembly-CSharp.dll`. That is why an unreviewed DLL dropped into
+`workshop/content/2436940/<id>/bin` technically still loads. **Do not use that as a deployment shortcut** — see §11.
+
+---
+
+## 11. Deployment target: `WorkshopLocal/`, never `workshop/content/`
+
+Confirmed the hard way on 2026-11-15 by overwriting the subscribed copy instead of the local package.
+
+**Wrong (what was done once):**
+
+```
+F:\SteamLibrary\steamapps\workshop\content\2436940\3839531454\bin\RainyLove.dll   ← Steam's download of the
+                                                                                   approved build. Do not write here.
+```
+
+Putting a newer DLL in that folder makes the client-side review gate complain, because the folder no longer matches
+the approved manifest for item `3839531454`:
+
+| UI text | Meaning |
+|---|---|
+| `这是无法加载认证信息的模组` | the manifest/hash pair for the item could not be satisfied by the files on disk |
+| `没有当前文件的审核提交记录` | the DLL hash on disk matches no submission record |
+| `模组的DLL与创意工坊版本不同` (`审核失败原因`) | the DLL differs from the Workshop version |
+
+The in-game panel also shows `version 1.4.6` for a subscriber-visible entry that is still 1.4.5 online, which is a
+second symptom of the same mistake. Under `local_only` this is only cosmetic (the gate logs a warning and still
+runs the code), but it is wrong and it makes the panel untrustworthy for diagnosing the real mod.
+
+**Right:**
+
+```
+F:\SteamLibrary\steamapps\common\Sephiria\WorkshopLocal\rainylove\
+├── bin\RainyLove.dll      ← build output (no .pdb, no .deps.json)
+├── metadata.json          ← version bumped
+├── thumbnail.png          ← preview (info.preview)
+├── Asset\                 ← rainylove.mp3 / AIZO.mp3 / README.txt
+├── config.json            ← local test settings, not uploaded
+└── uploadticket.json      ← MUST be preserved, see below
+```
+
+The user uploads from the in-game Workshop panel ("我的模组" → "上传到创意工坊"). Do not upload on their behalf.
+
+Two rules that keep the update going to the *same* item:
+
+1. **Keep `uploadticket.json`.** `WorkshopUploadPreparer` sets `plan.PublishedFileId = plan.Ticket?.PublishedFileId`,
+   so deleting the ticket loses the target id and `PublishToSteam` falls through to `CreateItem` — a brand new
+   Workshop entry instead of an update. Its stored `version` / `contentHash` are just a record of the last
+   submission; leave them alone.
+2. **Bump `metadata.json` `version`.** `alreadyPublished` in `WorkshopUploader` requires
+   `PublishedContentHash == plan.ContentHash`; a changed DLL changes the hash, so the upload correctly takes the
+   `PublishToSteam` → `SubmitItemUpdate` path for `3839531454`. Bumping the version keeps the ticket readable.
+
+Restoring the subscribed folder to the published build (needed after the mistake above) is a plain file copy from a
+backup of the released DLL + `metadata.json`; a Steam "verify files" also works.
+
+---
+
+## 12. Settings live in `Application.persistentDataPath`, not next to the DLL
+
+Through 1.4.6 `ModConfig` wrote `config.json` into `Context.PackageRoot`. That breaks for real subscribers: the
+`workshop/content/2436940/<id>/` folder is re-downloaded on every update, so settings were lost (or, if the folder
+was read-only, silently dropped), and the file sat in a directory the user is not expected to touch. Every other
+Sephiria mod keeps its settings under `Application.persistentDataPath`, so this one now does too:
+
+```
+%USERPROFILE%\AppData\LocalLow\TEAMHORAY\Sephiria\rainylove\config.json
+```
+
+`ModConfig.ConfigPath` resolves it once (the API must be called on the Unity main thread; `Load()`/`Save()` only run
+from `OnModLoaded` / the F7 panel, both main-thread). Two behaviours matter:
+
+1. **Migration.** If `PackageRoot\config.json` exists and the per-user file does not, `Load()` adopts the old values,
+   writes them to the new path, then renames the old file to `config.json.bak`. The order is `_settings = loaded;
+   SyncFromSettings(); Save();` — publishing to the static fields *before* `Save()` is what stops `SyncToSettings()`
+   from writing the defaults back over the values just read.
+2. **Precedence.** If both files exist, the per-user one wins and the legacy file is left untouched.
+
+Fallback: if `persistentDataPath` is empty or throws, the path degrades to `PackageRoot\config.json` (the old
+behaviour) instead of losing the settings. `PackageRoot` is still needed either way — it is how the shipped
+`Asset/rainylove.mp3` / `Asset/AIZO.mp3` are located.
+
+Verified by `D:/tmp/cfgtest`, which compiles the unmodified `src/ModConfig.cs` against stubs for `Application` and
+`Log`, with the real `Newtonsoft.Json` from `Sephiria_Data/Managed`: 26 checks covering a fresh install, legacy
+migration (including that `DeferStop: true` survives), save/load round-trip, the fallback path, both-files-present
+precedence, and the literal target path above.

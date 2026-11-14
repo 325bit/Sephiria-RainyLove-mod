@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace RainyLove
 {
@@ -16,6 +17,10 @@ namespace RainyLove
     ///
     /// MCI gives no completion callback either, so a timer (_endTime) resets state after natural end;
     /// otherwise an 'occupied' source would permanently block the other source's auto triggers.
+    ///
+    /// This object is DontDestroyOnLoad and the MCI device is a Windows-level device, so nothing tears the
+    /// sound down when Unity unloads a scene. The scene hook below is therefore the only thing that stops a
+    /// track from following the player back to the title screen or into the lobby.
     /// </summary>
     public enum AudioSourceKey { RainyLove, Aizo }
 
@@ -28,7 +33,7 @@ namespace RainyLove
         private AudioSourceKey? _current;   // Source currently audible
         private bool _currentManual;        // Current playback is a manual test (manual always wins; auto never interrupts)
         private float _endTime;             // Unscaled time of natural end; <=0 means no timer active
-        private string _currentWav;
+        private string _currentWav;         // Path of the audible file (logged when stopping, so the log names the track)
         private float _startTime;           // Unscaled start time of current playback (used to compute elapsed seconds)
         private float _duration;            // Total duration of the current audio (seconds)
 
@@ -37,43 +42,59 @@ namespace RainyLove
             Instance = this;
         }
 
+        private void OnEnable()
+        {
+            SceneManager.activeSceneChanged += OnActiveSceneChanged;
+        }
+
+        private void OnDisable()
+        {
+            SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+        }
+
+        /// <summary>Leaving the world (title screen, lobby, another world) must not leave the song sounding:
+        /// the MCI device lives outside Unity's scene graph and keeps playing after the scene is gone.
+        /// Entering a world fires this event too, but nothing is playing at that point, so it is a no-op then.</summary>
+        private void OnActiveSceneChanged(Scene previous, Scene next)
+        {
+            if (_current == null) return;
+            string name = string.IsNullOrEmpty(next.name) ? "(未命名场景)" : next.name;
+            StopAll("切换场景离开当前世界 → " + name);
+            Entry.Watcher?.ResetRunState();
+            Entry.Aizo?.ResetRunState();
+        }
+
         private void Update()
         {
             // Reset on natural end: winmm has no callback, so a timer is the fallback.
             if (_current != null && _endTime > 0f && Time.unscaledTime >= _endTime)
             {
-                SystemAudio.Stop(null);
-                Log.Message("[rainylove] 音频自然结束，已复位状态（" + _current + "）。");
-                _current = null;
-                _currentManual = false;
-                _endTime = 0f;
-                _currentWav = null;
-                _startTime = 0f;
-                _duration = 0f;
+                AudioSourceKey src = _current.Value;
+                SystemAudio.Stop(_currentWav);
+                Log.Message("[rainylove] 音频自然结束，已复位状态（" + src + "）。");
+                ResetState();
             }
         }
 
         private void OnDestroy()
         {
-            SystemAudio.Stop(null);
-            _current = null;
-            _currentManual = false;
-            _endTime = 0f;
-            _currentWav = null;
-            _startTime = 0f;
-            _duration = 0f;
+            SystemAudio.Stop(_currentWav);
+            ResetState();
+            if (Instance == this) Instance = null;
         }
 
-        /// <summary>Stop all playback immediately (used on mod unload).</summary>
-        public void StopAll()
+        /// <summary>Stop all playback immediately and reset the channel. Used on mod unload, on leaving a world and
+        /// when the run is over (nobody left inside the dungeon). Manual test playback is stopped as well: once the
+        /// run is gone there is no context left for a background song.</summary>
+        public void StopAll(string reason = null)
         {
-            SystemAudio.Stop(null);
-            _current = null;
-            _currentManual = false;
-            _endTime = 0f;
-            _currentWav = null;
-            _startTime = 0f;
-            _duration = 0f;
+            if (_current == null) return;   // Nothing sounding: the device is already closed, stay silent in the log
+
+            AudioSourceKey src = _current.Value;
+            string path = _currentWav;
+            ResetState();
+            SystemAudio.Stop(path);
+            Log.Message("[rainylove] 停止播放（" + src + "）：" + (reason ?? "全部停止") + "。");
         }
 
         /// <summary>Elapsed seconds for this source; returns -1 when this source is not playing.</summary>
@@ -91,6 +112,12 @@ namespace RainyLove
         {
             if (string.IsNullOrEmpty(audioPath)) return false;
 
+            // Already auto-playing this very source: report success and do NOT restart. Without this guard any
+            // upper-layer re-evaluation (e.g. the 'played this run' flag being cleared while the music is still
+            // sounding) would call Play() again, and SystemAudio.Play closes the device before opening it, so the
+            // track would jump back to 0:00 and never reach its end.
+            if (_current == src && !_currentManual) return true;
+
             if (_current == null) return Play(src, audioPath, volume, false);
 
             // Manual playback in progress: manual always wins, auto never interrupts.
@@ -107,12 +134,9 @@ namespace RainyLove
         {
             if (_current == src && !_currentManual)
             {
-                SystemAudio.Stop(null);
-                _current = null;
-                _endTime = 0f;
-                _currentWav = null;
-                _startTime = 0f;
-                _duration = 0f;
+                string path = _currentWav;
+                ResetState();
+                SystemAudio.Stop(path);
             }
         }
 
@@ -128,13 +152,9 @@ namespace RainyLove
         {
             if (_current == src)
             {
-                SystemAudio.Stop(null);
-                _current = null;
-                _currentManual = false;
-                _endTime = 0f;
-                _currentWav = null;
-                _startTime = 0f;
-                _duration = 0f;
+                string path = _currentWav;
+                ResetState();
+                SystemAudio.Stop(path);
             }
             // Note: do not PURGE other sources here, otherwise stopping A would also kill B's playing sound.
         }
@@ -169,6 +189,16 @@ namespace RainyLove
                         + "，音量 " + volume.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                         + "，时长 " + PlaybackNodeScheduler.Fmt(dur) + "）。");
             return true;
+        }
+
+        private void ResetState()
+        {
+            _current = null;
+            _currentManual = false;
+            _endTime = 0f;
+            _currentWav = null;
+            _startTime = 0f;
+            _duration = 0f;
         }
     }
 }

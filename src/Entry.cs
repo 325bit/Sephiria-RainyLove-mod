@@ -32,10 +32,12 @@ namespace RainyLove
             Aizo.Initialize();
 
             Log.Info("[rainylove] v" + metadata.modVersion + " 已加载，RainyLove=" + ModConfig.Enabled
-                     + " AIZO=" + ModConfig.AizoEnabled + " 优先级=" + ModConfig.AudioPriority);
+                     + " AIZO=" + ModConfig.AizoEnabled + " 优先级=" + ModConfig.AudioPriority
+                     + " 顺延播放=" + ModConfig.DeferStop);
             Log.Info("[rainylove] 呼出配置界面按键=" + ModConfig.MenuKey.ToUpperInvariant()
                      + "，输入系统可用=" + InputBridge.Available
                      + "，按键映射=" + InputBridge.IsKeyMapped(ModConfig.MenuKey));
+            Log.Info("[rainylove] 配置文件=" + ModConfig.ConfigPath);
         }
 
         // Called when leaving the world. Release resources and stop playback.

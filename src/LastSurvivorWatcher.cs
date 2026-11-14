@@ -12,10 +12,11 @@ namespace RainyLove
     /// This class only decides 'when to play'; playback and stopping are delegated to AudioChannel (which arbitrates RainyLove vs AIZO priority).
     /// The config UI 'Test Play / Stop Playback' also goes through AudioChannel, and manual playback is ended only by the stop button.
     ///
-    /// Stop policy matches AIZO: when the condition ends (leaving the dungeon / total wipe / survivors back to &gt;1), do not stop immediately;
-    /// instead defer stopping to a timeline node:
-    ///     p1 = 00:00 (start) / p2 = 01:27.1 / p3 = 02:10.07 / p4 = end of track
-    /// If the condition returns within 10s before a node (only one survivor again), defer to the next node; if it also triggers at p3, play the whole track.
+    /// Stop policy is switchable (ModConfig.DeferStop):
+    ///   false (default) - stop the moment the condition ends (a revived teammate silences the track at once);
+    ///   true            - defer to a timeline node: p1 = 00:00 (start) / p2 = 01:27.1 / p3 = 02:10.07 / p4 = end of
+    ///                     track. Re-triggering within 10s before a node defers to the next node; re-triggering at p3
+    ///                     plays the whole track. This mode can play up to the full 219s, which is why it is off by default.
     /// </summary>
     public class LastSurvivorWatcher : MonoBehaviour
     {
@@ -41,6 +42,27 @@ namespace RainyLove
         // Peak party size for this run (party size on entering the dungeon). A dead player's isInDungeon is never cleared,
         // so inDungeonTotal always keeps the peak; subtracting current survivors gives the death count.
         private int _peakInDungeon;
+
+        // A scene or level transition reports 'nobody inside the dungeon' for a frame or two; acting on the first such
+        // reading would silence the track during normal play. Only an empty dungeon that persists this long counts.
+        private const float EmptyGraceSec = 0.5f;
+
+        private float _emptySince = -1f;     // Unscaled time the dungeon was first seen empty; <0 means not empty
+        private bool _emptyHandled;          // The current empty period was already acted on
+        private float _noAvatarSince = -1f;  // Same, for 'the scene has no player avatar at all'
+        private bool _noAvatarHandled;
+        private bool _leftRunLogged;         // 'Left the run' was already logged for the current period
+
+        /// <summary>Reset everything that belongs to one run (multiplayer detection, peak party size, 'played' latch).
+        /// Called when the run ends or the world is left, so the next run starts from a clean state instead of
+        /// inheriting the previous one's flags.</summary>
+        public void ResetRunState()
+        {
+            _sched.Reset();
+            _playedThisRun = false;
+            _multiplayerRoom = false;
+            _peakInDungeon = 0;
+        }
 
         /// <summary>Whether audio is currently playing (shown as status in the config UI).</summary>
         public bool IsPlaying => AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.RainyLove);
@@ -141,9 +163,21 @@ namespace RainyLove
         {
             PlayerAvatar[] avatars = UnityEngine.Object.FindObjectsOfType<PlayerAvatar>(true);
 
+            // The run is gone entirely (back to the title screen / the world is being torn down). AudioChannel's scene
+            // hook normally fires first; this is the fallback for a teardown that never swaps the scene.
+            if (avatars.Length == 0)
+            {
+                if (Confirm(ref _noAvatarSince, ref _noAvatarHandled)) LeaveRun("场上已没有任何玩家角色");
+                return;
+            }
+            _noAvatarSince = -1f;
+            _noAvatarHandled = false;
+
             int inDungeonTotal = 0;
             int inDungeonAlive = 0;
             bool selfInDungeonAlive = false;
+            // The local avatar must be resolved through Mirror, NOT through NetworkBehaviour.authority (see PlayerLocator).
+            PlayerAvatar local = PlayerLocator.GetLocal(avatars);
 
             foreach (PlayerAvatar a in avatars)
             {
@@ -152,22 +186,24 @@ namespace RainyLove
                 if (!a.IsDead)
                 {
                     inDungeonAlive++;
-                    if (a.authority) selfInDungeonAlive = true;
+                    if (ReferenceEquals(a, local)) selfInDungeonAlive = true;
                 }
             }
 
             if (inDungeonTotal > _peakInDungeon) _peakInDungeon = inDungeonTotal;
             if (inDungeonTotal >= 2) _multiplayerRoom = true;
 
-            // Dungeon fully cleared: no immediate stop, defer to a node; also reset the run state.
+            // Nobody is inside the dungeon any more (everyone went back to the lobby / to town). This ends the run:
+            // stop immediately instead of deferring to a node, because a node plan would keep the song sounding while
+            // the player is no longer in the dungeon at all - which is exactly what players report as 'it never stops'.
             if (inDungeonTotal == 0)
             {
-                ScanCondition(false);
-                _multiplayerRoom = false;
-                _peakInDungeon = 0;
-                _playedThisRun = false;
+                if (Confirm(ref _emptySince, ref _emptyHandled)) LeaveRun("已离开地下城（无人在场）");
                 return;
             }
+            _emptySince = -1f;
+            _emptyHandled = false;
+            _leftRunLogged = false;
 
             if (!_multiplayerRoom) { ScanCondition(false); _playedThisRun = false; return; }
 
@@ -183,9 +219,32 @@ namespace RainyLove
 
             if (!_playedThisRun && lastSurvivor)
             {
-                _playedThisRun = true;
-                AutoPlay();
+                // Only latch 'played this run' when playback really started; otherwise a request rejected by the
+                // channel arbitration would silence this run's trigger forever.
+                _playedThisRun = AutoPlay();
             }
+        }
+
+        /// <summary>Debounce for 'nobody is here': returns true exactly once per period, after it has lasted
+        /// EmptyGraceSec. Level/scene transitions briefly report zero players and must not end the run.</summary>
+        private static bool Confirm(ref float since, ref bool handled)
+        {
+            if (since < 0f) since = Time.unscaledTime;
+            if (handled) return false;
+            if (Time.unscaledTime - since < EmptyGraceSec) return false;
+            handled = true;
+            return true;
+        }
+
+        /// <summary>End of run: drop any pending node stop, silence the channel (both sources - a song must not
+        /// outlive the run) and clear the per-run state.</summary>
+        private void LeaveRun(string why)
+        {
+            ResetRunState();
+            AudioChannel.Instance?.StopAll(why);
+            if (_leftRunLogged) return;
+            _leftRunLogged = true;
+            Log.Message("[rainylove] " + why + " → 本局状态已清理，顺延计划同时失效。");
         }
 
         /// <summary>Feed one 'condition met?' result to the node scheduler; when not auto-playing, clear the schedule and allow a later replay.</summary>
@@ -199,6 +258,19 @@ namespace RainyLove
                 _sched.Reset();
                 // Re-arm only once the condition is no longer met, otherwise the last-survivor state would replay the whole track in a loop.
                 if (!conditionMet) _playedThisRun = false;
+                return;
+            }
+
+            // Immediate-stop mode (DeferStop off): a revived teammate silences the track on the next scan.
+            // No node plan is ever created, so nothing can keep the track running to its end.
+            if (!ModConfig.DeferStop)
+            {
+                _sched.Reset();
+                if (!conditionMet)
+                {
+                    ch.StopAuto(AudioSourceKey.RainyLove);
+                    Log.Message("[rainylove] 条件解除（顺延播放已关闭）→ 立即停止播放。");
+                }
                 return;
             }
 
@@ -283,21 +355,23 @@ namespace RainyLove
 
         // ===================== Internal implementation =====================
 
-        /// <summary>Playback triggered by the condition: request arbitration directly if audio is ready, otherwise queue until loading completes.</summary>
-        private void AutoPlay()
+        /// <summary>Playback triggered by the condition: request arbitration directly if audio is ready, otherwise queue until loading completes.
+        /// Returns true only when the channel really started playing this source.</summary>
+        private bool AutoPlay()
         {
             if (!IsUsable)
             {
                 _playAfterLoad = true;
                 _manualAfterLoad = false;
                 if (!_reloading) StartCoroutine(LoadClip());
-                return;
+                return false;
             }
             if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume))
             {
-                _playedThisRun = true;
                 _sched.Reset();     // A new playback starts, so reset the node schedule
+                return true;
             }
+            return false;
         }
     }
 }
