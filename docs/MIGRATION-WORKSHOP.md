@@ -308,7 +308,7 @@ Decoder candidates, measured on the real files (reference: ffmpeg decode, correl
 - `SystemAudio` now calls `mciSendString("open \"<path>\" type mpegvideo alias <alias>")`, then `setaudio <alias> volume to 0..1000`, then `play <alias>`. Stops use `stop` + `close`.
 - **Single-device invariant.** MCI happily runs several aliases at once (verified: two MP3s reported `playing` simultaneously), and this mod must never sound two tracks together. `Play()` therefore always closes the previous device before opening the next one and tracks a single alias, so a second source can only *replace* the first. Verified: after `close`, `status <old alias> mode` fails with 263 (device no longer exists).
 - `AudioChannel.Play` only updates its state when playback really started, so a device error can no longer leave the source "occupied but silent".
-- **Volume:** the `mpegvideo` device accepts `setaudio volume` (verified: `status volume` round-trips 1000 → 0). The `waveaudio` device rejects it with 261 `MCIERR_UNSUPPORTED_FUNCTION`, so user-supplied WAVs keep the pure-C# render path that bakes the volume into a temp WAV.
+- **Volume:** the `mpegvideo` device accepts `setaudio volume` (verified: `status volume` round-trips 1000 → 0). The `waveaudio` device rejects it with 261 `MCIERR_UNSUPPORTED_FUNCTION`, so user-supplied WAVs keep the pure-C# render path that bakes the volume into a temp WAV. *(Superseded in 1.4.10: the WAV path was removed, §16.)*
 - **Duration:** MCI's own length query is unusable for MP3 (measured 674907 ms for a 219370 ms file, with or without `set time format milliseconds`), so `Mp3Duration` walks the frame headers (ID3v2 skip, MPEG-1/2/2.5 Layer III, CBR + VBR). Measured 219.432 s / 215.856 s vs. 219.371 s / 215.787 s from ffprobe — the delta is one header frame, irrelevant at node granularity.
 
 ### 8.3 Measured MCI behaviour (Windows 10 22H2, 2026-11-14)
@@ -617,8 +617,8 @@ stop -> ok
 
 The position wraps inside the range and the device keeps playing, so the loop is gapless — no close/open, unlike
 restarting from the mod. `waveaudio` rejects the flag with **259 / MCIERR_UNSUPPORTED_FUNCTION**, so a WAV (still
-reachable through the legacy `.wav` override) falls back to a single-shot playback plus a warning; only MP3 loops.
-This is one more reason the WAV path is being retired (§ appendix of the feasibility note).
+reachable through the legacy `.wav` override at the time) falls back to a single-shot playback plus a warning; only MP3 loops.
+This is one more reason the WAV path was retired in 1.4.10 (§16).
 
 ### 13.4 Timeline nodes inside a loop
 
@@ -759,3 +759,58 @@ by name.
 
 Before trusting `monsterType` on any `UnitAvatar`, exclude `PlayerAvatar` (and player-owned units). This is
 the same filter the game itself uses.
+
+## 16. Removed (1.4.10): the WAV path is gone
+
+The WAV branch outlived its purpose. It existed because the first Workshop build could only ship a raw PCM file the
+user dropped into `Asset/`, and it was kept afterwards as a "lossless override" that took precedence over the
+packaged MP3. By 1.4.10 both reasons were dead: the package ships its own MP3s, and the one feature the mod cannot
+work without - the boss-fight hold - needs `play ... repeat`, which the `waveaudio` device rejects with 259. A WAV
+would have silently degraded the hold to a single-shot playback. Retired rather than documented as a caveat.
+
+### 16.1 What was deleted
+
+| File | Removed |
+|---|---|
+| `AudioLoader.cs` | `RenderProcessedWav` (pure-C# 16-bit PCM volume scaler), its `_renderCache` / `_bySource` caches, `DeleteCacheFile` (temporary files in `%TEMP%`), `GetWavDuration`, the RIFF/WAVE parsing, and the `waveaudio` branch in `SystemAudio.PlayOnWorker` |
+| `ModConfig.cs` | `AudioExtensions` is now `{ ".mp3" }` (it was `{ ".wav", ".mp3" }`, WAV winning), and the dead `ResampleHz` field is gone from both the static surface and the JSON DTO |
+| `AizoWatcher.cs` / `LastSurvivorWatcher.cs` | `_volumeBaked` (the "was the volume baked into a temp WAV, so a volume change must reload" flag) and the re-render branch in `OnParamChanged` |
+| `AudioChannel.cs` | `_currentWav` renamed `_currentPath` - the field never held a WAV, but the name lied |
+| `ConfigUi.cs` | "未渲染（首次/改参数后自动渲染）" -> "未就绪（缺 MP3 或格式不符）"; the boss-hold hint no longer says "需要 MP3，WAV 不支持循环" |
+| `Asset/README.txt` (both packages) | Rewritten: MP3 only, WAV files are ignored |
+
+`TryPrepareAudio` keeps its signature but now only validates: it returns the source path untouched and the clamped
+volume, and returns false for anything that is not an existing `.mp3`. `SystemAudio.PlayOnWorker` re-checks the
+extension and hard-codes `type mpegvideo`, so a stray `.wav` cannot reach the device even if a caller bypasses
+preparation.
+
+### 16.2 What was kept on purpose
+
+- **The `play ... repeat` retry** (loop requested, driver refuses, play once anyway). That branch was originally
+  written for `waveaudio`, but it is still the right behaviour if `mpegvideo` ever refuses the flag: a boss fight
+  should not go silent because of a driver quirk.
+- **`Mp3Duration`'s frame walker.** MCI's own length query is wrong for these files (§8.2), so the duration still
+  has to come from the file.
+- **`ResampleHz` in existing `config.json` files.** The key is simply ignored now (Newtonsoft skips unknown members),
+  and it is no longer written back on the next `Save()`, so the field disappears from user files without a migration
+  step.
+
+### 16.3 Verification
+
+- New harness `D:/tmp/aloader` (20 checks) compiles the real `AudioLoader.cs` and asserts: `IsMp3` is
+  case-insensitive and rejects `null`/`.wav`, `TryPrepareAudio` refuses a missing file and an existing `.wav` (while
+  still returning the source path untouched for `.mp3`), the volume is clamped to 0~1, `GetAudioDuration` returns 0
+  for `.wav` and for a fake MP3 but 215.86 s for the shipped `AIZO.mp3`, and `SystemAudio.Play` returns false for a
+  WAV.
+- `D:/tmp/cfgtest` grew from 26 to 30: `AudioExtensions` is `{ ".mp3" }`, a directory holding only `AIZO.wav`
+  resolves to "not found", and when both `AIZO.wav` and `AIZO.mp3` exist the MP3 is selected. The legacy-config
+  fixture still contains `ResampleHz` and now also asserts that the key is not written back.
+- `gtest` 19 / `rlworld` 35 / `aizohold` 36 / `bossfight` 69 unchanged and green. Total 199 checks.
+- `package/bin/RainyLove.dll` deployed to `WorkshopLocal/rainylove/`, `metadata.json` bumped to **1.4.10**,
+  `package-upload/` synced (DLL + metadata + Asset/README.txt).
+
+### 16.4 Note for the subscriber-facing description
+
+"The mod plays MP3 only" was already true in practice for everyone who never dropped a WAV into `Asset/` - which is
+every subscriber, because `Asset/` is not reachable for them. This change only affects the author's local testing
+folder, where `rainylove.wav` / `AIZO.wav` used to shadow the MP3. Those files can be deleted; they are ignored now.

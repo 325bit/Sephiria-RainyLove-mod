@@ -33,7 +33,7 @@ namespace RainyLove
         private AudioSourceKey? _current;   // Source currently audible
         private bool _currentManual;        // Current playback is a manual test (manual always wins; auto never interrupts)
         private float _endTime;             // Unscaled time of natural end; <=0 means no timer active
-        private string _currentWav;         // Path of the audible file (logged when stopping, so the log names the track)
+        private string _currentPath;         // Path of the audible file (logged when stopping, so the log names the track)
         private float _startTime;           // Unscaled start time of current playback (used to compute elapsed seconds)
         private float _duration;            // Total duration of the current audio (seconds)
         private bool _loop;                 // Device-level 'repeat' is active, so the track never reaches its end
@@ -75,7 +75,7 @@ namespace RainyLove
             if (_current != null && _endTime > 0f && Time.unscaledTime >= _endTime)
             {
                 AudioSourceKey src = _current.Value;
-                SystemAudio.Stop(_currentWav);
+                SystemAudio.Stop(_currentPath);
                 Log.Message("[rainylove] 音频自然结束，已复位状态（" + src + "）。");
                 ResetState();
             }
@@ -83,7 +83,7 @@ namespace RainyLove
 
         private void OnDestroy()
         {
-            SystemAudio.Stop(_currentWav);
+            SystemAudio.Stop(_currentPath);
             ResetState();
             if (Instance == this) Instance = null;
         }
@@ -96,7 +96,7 @@ namespace RainyLove
             if (_current == null) return;   // Nothing sounding: the device is already closed, stay silent in the log
 
             AudioSourceKey src = _current.Value;
-            string path = _currentWav;
+            string path = _currentPath;
             ResetState();
             SystemAudio.Stop(path);
             Log.Message("[rainylove] 停止播放（" + src + "）：" + (reason ?? "全部停止") + "。");
@@ -130,7 +130,7 @@ namespace RainyLove
         public float GetDuration(AudioSourceKey src) => _current == src ? _duration : 0f;
 
         /// <summary>Auto-trigger request. Returns true when playback actually started (the caller should set its 'triggered this run' flag to avoid repeats).
-        /// loop is only honoured when the driver supports it (MP3/mpegvideo does); otherwise playback is single-shot.</summary>
+        /// loop asks the MP3 device to repeat the track; if the driver refuses, playback still starts once instead of going silent.</summary>
         public bool StartAuto(AudioSourceKey src, string audioPath, float volume, bool loop = false)
         {
             if (string.IsNullOrEmpty(audioPath)) return false;
@@ -157,7 +157,7 @@ namespace RainyLove
         {
             if (_current == src && !_currentManual)
             {
-                string path = _currentWav;
+                string path = _currentPath;
                 ResetState();
                 SystemAudio.Stop(path);
             }
@@ -175,7 +175,7 @@ namespace RainyLove
         {
             if (_current == src)
             {
-                string path = _currentWav;
+                string path = _currentPath;
                 ResetState();
                 SystemAudio.Stop(path);
             }
@@ -204,7 +204,7 @@ namespace RainyLove
 
             _current = src;
             _currentManual = manual;
-            _currentWav = audioPath;
+            _currentPath = audioPath;
             float dur = AudioLoader.GetAudioDuration(audioPath);
             _duration = dur;
             _startTime = Time.unscaledTime;
@@ -224,7 +224,7 @@ namespace RainyLove
             _current = null;
             _currentManual = false;
             _endTime = 0f;
-            _currentWav = null;
+            _currentPath = null;
             _startTime = 0f;
             _duration = 0f;
             _loop = false;

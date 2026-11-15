@@ -119,7 +119,7 @@ A 更符合「战斗结束」的直觉，B 会让音乐盖住胜利演出。**�
 // AudioChannel.cs:70
 if (_current != null && _endTime > 0f && Time.unscaledTime >= _endTime)
 {
-    SystemAudio.Stop(_currentWav);
+    SystemAudio.Stop(_currentPath);
     Log.Message("[rainylove] 音频自然结束，已复位状态（" + src + "）。");
     ResetState();
 }
@@ -292,10 +292,10 @@ BOSS 战期间保持播放（战后按顺延设置停止）  [ 开关 ]
 | `EMonsterType { Normal, Miniboss, Boss, Dummy }` | `EMonsterType.cs` |
 | `UnitAvatar.monsterType` / `IsDead` 均为 SyncVar | `UnitAvatar.cs:61-62` / `:274` |
 | 血条由 `ClientOpenBossHPBar` 创建 | `BossSpawner.cs:1439` |
-| MP3 走 `mpegvideo`、WAV 走 `waveaudio` | `AudioLoader.cs:57-89`（`PlayOnWorker` 按扩展名选 device） |
+| 只走 `mpegvideo`（1.4.10 起 WAV 路径已删） | `AudioLoader.cs` 的 `PlayOnWorker` |
 | 自然结束靠 `_endTime` 定时器 | `AudioChannel.cs:67-77` |
 
-## 附录 B：WAV 路径的处置（本次不做）
+## 附录 B：WAV 路径的处置（已在 1.4.10 执行）
 
 你已决定废弃 WAV 路径。现状是 `.wav` 在 `ModConfig.AudioExtensions` 里排在 `.mp3` 前面、优先级更高，
 且 `Asset/README.txt` 对外宣传「可放同名 wav 做无损替换」。真正的废弃需要动四处：
@@ -305,7 +305,11 @@ BOSS 战期间保持播放（战后按顺延设置停止）  [ 开关 ]
 3. `Asset/README.txt` 与 `README.md` 的说明改写；
 4. `SystemAudio` 里 `device` 的扩展名判断可以简化成固定 `mpegvideo`。
 
-这与本功能无关，建议**单独一版**做，不要混进 1.4.7——混在一起会让这次复审同时承担两个变更，
-出问题不好定位。另外补充一条实测数据供你参考：`waveaudio` 不支持 `repeat`，
+**执行记录（1.4.10）**：上面四项全部完成，另外还删了 `GetWavDuration`、`_volumeBaked` 标志与 `ResampleHz`
+字段，`_currentWav` 重命名为 `_currentPath`。详细清单与回归测试见 `MIGRATION-WORKSHOP.md` §16。
+`play ... repeat` 失败后回退单次播放这段**保留**（防御 mpegvideo 本身异常），但它不再与格式相关。
+
+当初的建议是「单独一版做，不要混进 1.4.7」——本次正是如此：1.4.7/1.4.8/1.4.9 处理 BOSS 战保持的 bug，
+WAV 清理放在 1.4.10，两者互不干扰。补充一条实测数据：`waveaudio` 不支持 `repeat`，
 `play w1 repeat from 0 to 1000` 直接返回错误码 **259（MCIERR_UNSUPPORTED_FUNCTION）**；
 这也说明保留 WAV 路径的话，「战中循环」在 WAV 上只能退化成有断点的重启，体验不一致——更加印证废弃是对的。

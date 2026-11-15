@@ -30,7 +30,6 @@ namespace RainyLove
         private bool _playedThisRun;
         private string _playPath;
         private float _playVolume = 1f;
-        private bool _volumeBaked;    // True when the volume was baked into a temp WAV, so a volume change must reload
         private bool _audioReady;
         private bool _reloading;      // LoadClip coroutine in progress
         private bool _playAfterLoad;  // Start auto playback as soon as loading completes (audio was not ready when the condition triggered)
@@ -81,8 +80,8 @@ namespace RainyLove
             StartCoroutine(LoadClip());
         }
 
-        /// <summary>Resolve the audio file and prepare it for playback. Nothing is decoded here: MCI decodes MP3 at
-        /// playback time, and only user-supplied WAV files get a volume-baked temp copy.</summary>
+        /// <summary>Resolve the audio file and prepare it for playback. Nothing is decoded here: MCI decodes the MP3
+        /// at playback time, so the source path is handed over untouched.</summary>
         private IEnumerator LoadClip()
         {
             if (_reloading) yield break;
@@ -93,7 +92,7 @@ namespace RainyLove
             string path = ModConfig.ResolveAudioPath(ModConfig.DefaultRainyBase, out bool exists);
             if (!exists)
             {
-                Log.Warning("[rainylove] 找不到音频文件（需要 rainylove.mp3 或 rainylove.wav）：" + path +
+                Log.Warning("[rainylove] 找不到音频文件（需要 rainylove.mp3）：" + path +
                                       "。请把文件放到 WorkshopLocal/rainylove/Asset/ 下");
                 _reloading = false;
                 yield break;
@@ -105,7 +104,6 @@ namespace RainyLove
             {
                 _playPath = playPath;
                 _playVolume = playVolume;
-                _volumeBaked = !string.Equals(playPath, path, System.StringComparison.OrdinalIgnoreCase);
                 float duration = AudioLoader.GetAudioDuration(playPath);
                 _sched.Duration = duration;
                 _audioReady = true;
@@ -114,7 +112,7 @@ namespace RainyLove
             }
             else
             {
-                Log.Warning("[rainylove] 音频准备失败：需要 rainylove.mp3 或 rainylove.wav：" + path);
+                Log.Warning("[rainylove] 音频准备失败：需要 rainylove.mp3：" + path);
             }
             _reloading = false;
 
@@ -342,20 +340,13 @@ namespace RainyLove
             }
         }
 
-        /// <summary>Volume changed: for MP3 the device applies the new volume on the next play, so nothing has to be
-        /// re-prepared; a volume-baked WAV copy does have to be re-rendered. Interrupts auto playback only.</summary>
+        /// <summary>Volume changed: the MP3 device applies the new volume on the next play, so nothing has to be
+        /// re-prepared - the prepared path stays valid. Interrupts auto playback only.</summary>
         public void OnParamChanged()
         {
             _sched.Reset();
             AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
-            if (!_volumeBaked)
-            {
-                Log.Message("[rainylove] RainyLove 音量已更新，下次播放直接使用新音量。");
-                return;
-            }
-            _audioReady = false;
-            _playPath = null;
-            Log.Message("[rainylove] RainyLove 音频参数已变更，下次播放按新参数重新渲染。");
+            Log.Message("[rainylove] RainyLove 音量已更新，下次播放直接使用新音量。");
         }
 
         // ===================== Internal implementation =====================

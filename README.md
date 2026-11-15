@@ -8,3 +8,5 @@
 - 纯客户端表现层 mod：只读游戏状态，不改任何服务端数据，不产生需要同步的内容。
     
   已声明 `multiplayer.installation: local_only`，**其他参与者无需安装本 mod**。
+- 音频只支持 **MP3**（`Asset/rainylove.mp3`、`Asset/AIZO.mp3`，随包附带）。WAV 播放路径已移除，
+  放同名 `.wav` 不会生效；想换曲子就用同名 `.mp3` 覆盖。

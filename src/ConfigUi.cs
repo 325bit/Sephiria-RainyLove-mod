@@ -263,7 +263,7 @@ namespace RainyLove
             GUI.Label(new Rect(24f, 358f, WindowWidth - 48f, 22f),
                 ModConfig.AizoBossHold
                     ? "已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播；战斗结束后按顺延播放设置停止"
-                    : "已关闭：只看血量阈值决定何时停止（需要 MP3，WAV 不支持循环）", _small);
+                    : "已关闭：只看血量阈值决定何时停止", _small);
 
             Fill(new Rect(24f, 396f, WindowWidth - 48f, 1f), UiBorder);
 
@@ -329,7 +329,7 @@ namespace RainyLove
         private void DrawStatus(float y, bool ready, bool playing, string name)
         {
             GUI.Label(new Rect(24f, y, 360f, 24f),
-                ready ? (name + "：音频已就绪") : (name + "：未渲染（首次/改参数后自动渲染）"), _small);
+                ready ? (name + "：音频已就绪") : (name + "：未就绪（缺 MP3 或格式不符）"), _small);
             GUI.Label(new Rect(WindowWidth - 224f, y, 200f, 24f),
                 playing ? "● 正在播放" : "○ 未播放", playing ? _okRight : _smallRight);
         }

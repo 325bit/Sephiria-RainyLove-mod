@@ -20,9 +20,9 @@ namespace RainyLove
         internal const string DefaultRainyBase = "rainylove";
         internal const string DefaultAizoBase = "AIZO";
 
-        /// <summary>Extensions tried in order when resolving a default audio file. .wav wins so a user-supplied
-        /// lossless/PCM override still takes precedence over the packaged .mp3.</summary>
-        internal static readonly string[] AudioExtensions = { ".wav", ".mp3" };
+        /// <summary>Extensions tried in order when resolving a default audio file. MP3 only: the WAV path was retired
+        /// in 1.4.10 because the waveaudio driver supports neither volume control nor looping.</summary>
+        internal static readonly string[] AudioExtensions = { ".mp3" };
 
         /// <summary>Absolute path to the mod folder. Set by Entry from Context.PackageRoot before Load().
         /// Used for the shipped Asset/ audio, and as the fallback config location only.</summary>
@@ -39,7 +39,6 @@ namespace RainyLove
         public static string AudioFilePath = "";
         public static float ScanInterval = 0.25f;
         public static bool OnlyWhenSelfIsLast = false;
-        public static int ResampleHz = 44100;       // Retained for compatibility; playback format follows the source file.
 
         // ===== AIZO =====
         public static bool AizoEnabled = true;
@@ -168,7 +167,6 @@ namespace RainyLove
             AudioFilePath = _settings.AudioFilePath ?? "";
             ScanInterval = _settings.ScanInterval;
             OnlyWhenSelfIsLast = _settings.OnlyWhenSelfIsLast;
-            ResampleHz = _settings.ResampleHz;
             AizoEnabled = _settings.AizoEnabled;
             AizoVolume = _settings.AizoVolume;
             AizoAudioFilePath = _settings.AizoAudioFilePath ?? "";
@@ -187,7 +185,6 @@ namespace RainyLove
             _settings.AudioFilePath = AudioFilePath;
             _settings.ScanInterval = ScanInterval;
             _settings.OnlyWhenSelfIsLast = OnlyWhenSelfIsLast;
-            _settings.ResampleHz = ResampleHz;
             _settings.AizoEnabled = AizoEnabled;
             _settings.AizoVolume = AizoVolume;
             _settings.AizoAudioFilePath = AizoAudioFilePath;
@@ -201,7 +198,7 @@ namespace RainyLove
 
         /// <summary>Resolve the absolute audio file path from config; baseName is "rainylove" / "AIZO" without an
         /// extension. A configured path may be a file or a directory (see AudioFilePath / AizoAudioFilePath).
-        /// Falls back to PackageRoot/Asset then PackageRoot, trying .wav before .mp3.</summary>
+        /// Falls back to PackageRoot/Asset then PackageRoot; MP3 is the only extension tried.</summary>
         internal static string ResolveAudioPath(string baseName, out bool fileExists)
         {
             fileExists = false;
@@ -247,7 +244,6 @@ namespace RainyLove
             public string AudioFilePath = "";
             public float ScanInterval = 0.25f;
             public bool OnlyWhenSelfIsLast = false;
-            public int ResampleHz = 44100;
             public bool AizoEnabled = true;
             public float AizoVolume = 0.4f;
             public string AizoAudioFilePath = "";
