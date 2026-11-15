@@ -40,6 +40,15 @@ namespace RainyLove
         public static float ScanInterval = 0.25f;
         public static bool OnlyWhenSelfIsLast = false;
 
+        /// <summary>Keep RainyLove playing for the whole duration of a mini-boss / boss fight.
+        /// true  = while a Miniboss/Boss is being fought, RainyLove never stops (a revived teammate no longer
+        ///         silences it, and neither DeferStop nor the node schedule may end it) and the track repeats
+        ///         when it reaches its end; once the fight is over the normal policy decides when it stops.
+        /// false = the survivor condition alone decides when to stop (previous behaviour).
+        /// Same contract as AizoBossHold, only for the other track. Off by default: music that refuses to stop
+        /// reads to players as the 'it never stops' bug, not as a feature.</summary>
+        public static bool RainyLoveBossHold = false;
+
         // ===== AIZO =====
         public static bool AizoEnabled = true;
         public static float AizoVolume = 0.4f;
@@ -65,10 +74,10 @@ namespace RainyLove
         ///         recovering above the AIZO threshold silences AIZO at once).
         /// Default false: the node deferral can legitimately keep playing for up to a whole track, which players
         /// report as 'the music never stops', so the predictable behaviour is the default.
-        /// The in-game label is 顺延播放（到时间轴节点再停）-- named after what the option adds (delayed playback tail)
-        /// rather than 顺延停止, which read as 'delay the stop' and confused players.
-        /// The field name stays DeferStop because it is also the JSON key in config.json; renaming it would silently
-        /// reset every existing user's setting.</summary>
+        /// The in-game label is 顺延播放（播完当前这段主歌/副歌再停）-- worded after what the player hears
+        /// (the current verse/chorus finishes, then it stops) rather than after the internal 'timeline node',
+        /// which nobody understood. The field name stays DeferStop because it is also the JSON key in
+        /// config.json; renaming it would silently reset every existing user's setting.</summary>
         public static bool DeferStop = false;
 
         private static Settings _settings = new Settings();
@@ -167,6 +176,7 @@ namespace RainyLove
             AudioFilePath = _settings.AudioFilePath ?? "";
             ScanInterval = _settings.ScanInterval;
             OnlyWhenSelfIsLast = _settings.OnlyWhenSelfIsLast;
+            RainyLoveBossHold = _settings.RainyLoveBossHold;
             AizoEnabled = _settings.AizoEnabled;
             AizoVolume = _settings.AizoVolume;
             AizoAudioFilePath = _settings.AizoAudioFilePath ?? "";
@@ -185,6 +195,7 @@ namespace RainyLove
             _settings.AudioFilePath = AudioFilePath;
             _settings.ScanInterval = ScanInterval;
             _settings.OnlyWhenSelfIsLast = OnlyWhenSelfIsLast;
+            _settings.RainyLoveBossHold = RainyLoveBossHold;
             _settings.AizoEnabled = AizoEnabled;
             _settings.AizoVolume = AizoVolume;
             _settings.AizoAudioFilePath = AizoAudioFilePath;
@@ -244,6 +255,7 @@ namespace RainyLove
             public string AudioFilePath = "";
             public float ScanInterval = 0.25f;
             public bool OnlyWhenSelfIsLast = false;
+            public bool RainyLoveBossHold = false;
             public bool AizoEnabled = true;
             public float AizoVolume = 0.4f;
             public string AizoAudioFilePath = "";

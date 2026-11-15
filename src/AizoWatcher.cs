@@ -13,10 +13,11 @@ namespace RainyLove
     ///
     /// Stop policy is switchable (ModConfig.DeferStop):
     ///   false (default) - stop the moment health is back above both thresholds;
-    ///   true            - defer to the next node: AIZO timeline p1 = 00:00 / p2 = 00:43.5 / p3 = 01:38 / p4 = 02:20 /
-    ///                     p5 = end of track. Example: full health at 01:00 -> keeps playing until 01:38 (p3).
-    ///                     Re-triggering within NodeWindowSec (10s) before the target node defers to the following node;
-    ///                     re-triggering in the p4 (02:20) window plays the whole track.
+    ///   true            - defer to the next node on the AIZO timeline:
+    ///                     p2 00:43.5 / p3 01:38 / p4 02:20 / p5 end of track.
+    ///                     Example: full health at 01:00 keeps playing until 01:38 (p3).
+    ///                     Re-triggering within NodeWindowSec before the target node defers to the following node;
+    ///                     re-triggering in the window before the last node plays the whole track.
     ///
     /// Health field names vary between builds, so reflection probes PlayerAvatar for current / max / direct-percentage fields by candidate name.
     /// The resolved MemberInfo is cached and logged so the correct field can be verified.
@@ -30,10 +31,14 @@ namespace RainyLove
     public class AizoWatcher : MonoBehaviour
     {
         // ===== Timeline nodes (seconds): p2 00:43.5 / p3 01:38 / p4 02:20 / p5 end of track; 10s window =====
-        private readonly PlaybackNodeScheduler _sched = new PlaybackNodeScheduler(
-            new[] { 43.5f, 98f, 140f },
-            new[] { "p2 00:43.5", "p3 01:38", "p4 02:20", "p5 曲末" },
-            10f);
+        // Hand-picked, three nodes plus the end of the track. Kept deliberately sparse: a stop lands only on
+        // these points, so a chorus or any long section is never cut mid-phrase. The trade-off is a much longer
+        // delay - the health condition can clear up to ~54s before the track actually stops.
+        private static readonly float[] NodeTimes = { 43.5f, 98f, 140f };
+        private const float NodeWindowSec = 10f;
+
+        private readonly PlaybackNodeScheduler _sched =
+            new PlaybackNodeScheduler(NodeTimes, PlaybackNodeScheduler.BuildLabels(NodeTimes), NodeWindowSec);
 
         // When loading a save or changing scenes, the game first spawns a fresh local PlayerAvatar;
         // health fields are not populated until save data has been applied (see 'Reset For New Game' in the log).

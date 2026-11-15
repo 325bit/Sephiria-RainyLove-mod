@@ -7,7 +7,7 @@
   "mod": {
     "schemaVersion": 1,
     "modId": "rainylove.lastsurvivor",
-    "version": "1.4.10",
+    "version": "1.4.12",
     "author": "rainylove",
     "multiplayer": {
       "installation": "local_only"

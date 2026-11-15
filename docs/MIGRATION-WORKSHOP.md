@@ -814,3 +814,54 @@ preparation.
 "The mod plays MP3 only" was already true in practice for everyone who never dropped a WAV into `Asset/` - which is
 every subscriber, because `Asset/` is not reachable for them. This change only affects the author's local testing
 folder, where `rainylove.wav` / `AIZO.wav` used to shadow the MP3. Those files can be deleted; they are ignored now.
+
+---
+
+## 17. Addendum (1.4.12): the boss hold also covers RainyLove
+
+`LastSurvivorWatcher` gets the option AIZO already had: `ModConfig.RainyLoveBossHold`, panel label
+「BOSS 战期间保持播放」 on the RainyLove tab, **off by default**, JSON key `RainyLoveBossHold`.
+
+The contract is the one from §13, applied to the other track:
+
+- While `BossFightWatcher` reports a fight, **no stop path is reachable** — the last-survivor condition,
+  `DeferStop` and the node schedule are all ignored — and the track is requested with device-level MCI `repeat`,
+  so reaching its end does not silence it.
+- When the fight ends the normal policy takes over: immediate stop with `DeferStop` off, or "finish this
+  verse/chorus" with it on. Only extends, never starts: RainyLove still begins solely on the last-survivor
+  trigger, so turning the hold on cannot make the song play in single player.
+
+### 17.1 Code shape (`src/LastSurvivorWatcher.cs`)
+
+- `_holdLatch` / `_holdLogged`, cleared in `ResetRunState`, `StopFromUi` and `OnParamChanged` — the same
+  "the user silenced it, do not resurrect it" rule as AIZO.
+- The hold block sits at the top of `ScanCondition`, before the `DeferStop` branch, so it short-circuits both the
+  immediate-stop and the node-deferral paths. `TickScheduledStop` bails out while `_holdLatch` is set: the plan is
+  cleared on the next 0.25s scan, but a node landing inside that gap must not cut the track.
+- `AutoPlay()` passes `loop = RainyLoveBossHold && BossFightWatcher.Active`, including the `_playAfterLoad` path.
+  A run-through that was already playing when the fight started stays non-looping until it ends (MCI cannot add
+  `repeat` to a running device); the replay the hold triggers afterwards is looping. Same accepted trade-off
+  as AIZO (§14.2).
+- `BossFightWatcher.Tick()` is now called from `LastSurvivorWatcher.Update` as well. Previously only `AizoWatcher`
+  ticked it, and its early return on `!AizoEnabled` meant that switching AIZO off would freeze the detector the
+  RainyLove hold depends on. `Tick` throttles itself to one scan per 0.5s, so the duplicate call per frame costs
+  one comparison.
+- The detector's transition logs moved from `[rainylove][AIZO]` to `[rainylove][BOSS]`; they are no longer
+  AIZO-specific.
+
+### 17.2 Verification
+
+`D:/tmp/rlworld` grew from 43 to 68 checks with a ⑤ group driven through the real watcher and the real
+`AudioChannel`: a start before the fight does not request `repeat`; a revived teammate no longer silences the
+song while a boss is engaged; the non-looping run-through resets at the track end and the hold replays it with
+`repeat`; the fight ending releases the latch and (with `DeferStop` off) stops immediately; the hold alone never
+starts playback; `StopFromUi` is not undone by the hold; `ResetRunState` clears the latch. All six harnesses
+green: gtest 21 / rlworld 68 / bossfight 69 / aizohold 44 / aloader 20 / cfgtest 30.
+
+### 17.3 Panel wording
+
+Same style the AIZO tab already uses, so the two tabs read as one option: label 「BOSS 战期间保持播放」,
+on 「已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播，直到当前BOSS战结束」, off
+「已关闭：只看存活人数决定何时停止」 (AIZO keeps 「已关闭：只看血量阈值决定何时停止」).
+The label and the 'already on' line are shared constants in `ConfigUi.cs`; only the 'off' line names the trigger
+that still decides on its own.

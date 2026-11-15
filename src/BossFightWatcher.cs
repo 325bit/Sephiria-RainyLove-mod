@@ -3,8 +3,8 @@ using UnityEngine;
 namespace RainyLove
 {
     /// <summary>
-    /// Detects whether a mini-boss or boss fight is currently going on, for the AIZO 'keep playing through a boss
-    /// fight' option.
+    /// Detects whether a mini-boss or boss fight is currently going on, for the 'keep playing through a boss
+    /// fight' option that AIZO and RainyLove both offer (ModConfig.AizoBossHold / RainyLoveBossHold).
     ///
     /// The signal is deliberately NOT BossSpawner.IsBossBattleInProgress: that property reads a battlePhase field
     /// which is only ever written inside BossSpawner.Update() under 'if (base.isServer)', and the client RPC
@@ -60,7 +60,8 @@ namespace RainyLove
             return PlayerSource != null ? PlayerSource() : PlayerLocator.GetLocal();
         }
 
-        /// <summary>Called from AizoWatcher.Update; throttled internally, so calling every frame is fine.</summary>
+        /// <summary>Called from both watchers' Update; throttled internally, so calling it twice per frame is fine
+        /// (whichever track is enabled keeps the detector warm).</summary>
         internal static void Tick()
         {
             float now = Time.unscaledTime;
@@ -74,10 +75,10 @@ namespace RainyLove
             if (!BossFightLogic.Step(fighting, now, ref _state)) return;
 
             if (_state.Active)
-                Log.Message("[rainylove][AIZO] 检测到小BOSS/BOSS → 战斗期间不停止播放，播完自动重播。（" +
+                Log.Message("[rainylove][BOSS] 检测到小BOSS/BOSS → 战斗期间不停止播放，播完自动重播。（" +
                             Describe(engaged, self) + "）");
             else
-                Log.Message("[rainylove][AIZO] BOSS 战结束（场上已无正在交战的 BOSS）→ 按顺延播放设置处理停止。");
+                Log.Message("[rainylove][BOSS] BOSS 战结束（场上已无正在交战的 BOSS）→ 按各曲自己的停止设置处理停止。");
         }
 
         /// <summary>

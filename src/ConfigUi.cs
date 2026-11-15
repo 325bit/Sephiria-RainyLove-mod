@@ -24,6 +24,13 @@ namespace RainyLove
         private static readonly Color UiDanger = new Color(0.80f, 0.31f, 0.31f, 1f);
         private static readonly Color UiOk = new Color(0.30f, 0.72f, 0.45f, 1f);
 
+        // BOSS hold: both tabs offer the same behaviour for a different track, so the name and the 'already on'
+        // explanation are shared - only the 'off' line has to name the trigger that keeps deciding on its own.
+        private const string BossHoldLabel = "BOSS 战期间保持播放";
+        private const string BossHoldOn = "已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播，直到当前BOSS战结束";
+        private const string BossHoldOffRainyLove = "已关闭：只看存活人数决定何时停止";
+        private const string BossHoldOffAizo = "已关闭：只看血量阈值决定何时停止";
+
         private enum Tab { RainyLove, Aizo, Main }
         private Tab _tab = Tab.RainyLove;
 
@@ -215,28 +222,27 @@ namespace RainyLove
             SliderRow(118f, 144f, "播放音量", Percent(ModConfig.Volume),
                 ModConfig.Volume, 0f, 1f, 0.05f, v => { ModConfig.Volume = Mathf.Round(v * 100f) / 100f; if (Entry.Watcher != null) Entry.Watcher.OnParamChanged(); });
 
-            GUI.Label(new Rect(24f, 190f, WindowWidth - 48f, 22f),
-                ModConfig.DeferStop
-                    ? "顺延播放：不再是最后一名存活者时继续播到时间轴节点再停"
-                    : "顺延播放关闭：不再是最后一名存活者时立即停止", _small);
+            // Boss-fight hold: no stop at all while a Miniboss/Boss is alive, and the track repeats.
+            GUI.Label(new Rect(24f, 184f, 400f, 32f), BossHoldLabel, _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 184f, 112f, 32f), ModConfig.RainyLoveBossHold))
+                ModConfig.RainyLoveBossHold = !ModConfig.RainyLoveBossHold;
+            GUI.Label(new Rect(24f, 220f, WindowWidth - 48f, 22f),
+                ModConfig.RainyLoveBossHold ? BossHoldOn : BossHoldOffRainyLove, _small);
 
-            Fill(new Rect(24f, 222f, WindowWidth - 48f, 1f), UiBorder);
+            Fill(new Rect(24f, 252f, WindowWidth - 48f, 1f), UiBorder);
 
             LastSurvivorWatcher rl = Entry.Watcher;
-            DrawStatus(248f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
+            DrawStatus(266f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
 
             bool rlOn = ModConfig.Enabled;
             bool rlDisabled = !rlOn;
             GUI.enabled = !rlDisabled;
-            if (Button(new Rect(24f, 286f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
-            if (Button(new Rect(186f, 286f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
+            if (Button(new Rect(24f, 306f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
+            if (Button(new Rect(186f, 306f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 286f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 306f, 120f, 36f), "完成", true)) SetVisible(false);
 
-            GUI.Label(new Rect(24f, 336f, WindowWidth - 48f, 24f),
-                "RainyLove 仅剩最后一名存活者时播放；顺延播放：" + (ModConfig.DeferStop ? "开启（到节点再停）" : "关闭（条件解除立即停）")
-                + "。开关在主设置里。", _small);
         }
 
         // ---- AIZO tab ----
@@ -251,19 +257,12 @@ namespace RainyLove
             SliderRow(242f, 268f, "开始播放的血量固定值", Mathf.RoundToInt(ModConfig.AizoHealthValue).ToString(),
                 ModConfig.AizoHealthValue, 0f, 100f, 1f, v => ModConfig.AizoHealthValue = Mathf.Round(v));
 
-            GUI.Label(new Rect(24f, 296f, WindowWidth - 48f, 22f),
-                ModConfig.DeferStop
-                    ? "顺延播放：血量回升到阈值以上时继续播到时间轴节点再停"
-                    : "顺延播放关闭：血量回升到阈值以上时立即停止", _small);
-
             // Boss-fight hold: no stop at all while a Miniboss/Boss is alive, and the track repeats.
-            GUI.Label(new Rect(24f, 322f, 400f, 32f), "BOSS 战期间保持播放（战后按顺延设置停止）", _body);
+            GUI.Label(new Rect(24f, 322f, 400f, 32f), BossHoldLabel, _body);
             if (Toggle(new Rect(WindowWidth - 136f, 322f, 112f, 32f), ModConfig.AizoBossHold))
                 ModConfig.AizoBossHold = !ModConfig.AizoBossHold;
             GUI.Label(new Rect(24f, 358f, WindowWidth - 48f, 22f),
-                ModConfig.AizoBossHold
-                    ? "已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播；战斗结束后按顺延播放设置停止"
-                    : "已关闭：只看血量阈值决定何时停止", _small);
+                ModConfig.AizoBossHold ? BossHoldOn : BossHoldOffAizo, _small);
 
             Fill(new Rect(24f, 396f, WindowWidth - 48f, 1f), UiBorder);
 
@@ -283,22 +282,22 @@ namespace RainyLove
         // ---- Main Settings tab ----
         private void DrawMain()
         {
-            GUI.Label(new Rect(24f, 124f, 400f, 32f), "启用 RainyLove（最后存活者播放）", _body);
+            GUI.Label(new Rect(24f, 124f, 400f, 32f), "启用 RainyLove（只剩最后一人存活时播放）", _body);
             if (Toggle(new Rect(WindowWidth - 136f, 124f, 112f, 32f), ModConfig.Enabled)) ModConfig.Enabled = !ModConfig.Enabled;
 
             GUI.Label(new Rect(24f, 172f, 400f, 32f), "启用 AIZO（血量过低播放）", _body);
             if (Toggle(new Rect(WindowWidth - 136f, 172f, 112f, 32f), ModConfig.AizoEnabled)) ModConfig.AizoEnabled = !ModConfig.AizoEnabled;
 
-            GUI.Label(new Rect(24f, 220f, 400f, 32f), "顺延播放（到时间轴节点再停）", _body);
+            GUI.Label(new Rect(24f, 220f, 500f, 32f), "延迟停播", _body);
             if (Toggle(new Rect(WindowWidth - 136f, 220f, 112f, 32f), ModConfig.DeferStop)) ModConfig.DeferStop = !ModConfig.DeferStop;
             GUI.Label(new Rect(24f, 254f, WindowWidth - 48f, 22f),
                 ModConfig.DeferStop
-                    ? "已开启：条件解除后不停，继续播到下一个节点（最晚可播完整首）"
-                    : "已关闭：条件解除立即停（救起队友 / 血量回到阈值以上）", _small);
+                    ? "已开启：条件不再成立时，不会当场掐断，等这段主歌/副歌唱完才停"
+                    : "已关闭：条件一不成立就立刻静音（救起队友 / 血量回到阈值以上）", _small);
 
             Fill(new Rect(24f, 284f, WindowWidth - 48f, 1f), UiBorder);
 
-            GUI.Label(new Rect(24f, 300f, 500f, 26f), "音频播放优先级（两者同时想播时）", _body);
+            GUI.Label(new Rect(24f, 300f, 500f, 26f), "音频播放优先级", _body);
             PrioritySelector(332f);
 
             // Status: whether the two sources are playing

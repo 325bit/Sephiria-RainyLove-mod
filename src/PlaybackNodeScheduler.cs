@@ -15,6 +15,10 @@ namespace RainyLove
     ///      would cancel it for being 'outside the new target's window', degenerating into never stopping).
     ///   3. If it still triggers after deferring to the last node (end of track), play the whole track and schedule no stop.
     ///   4. Condition becomes true outside the window -> cancel this stop plan, keep playing normally, and reschedule when it next becomes false.
+    ///
+    /// Node grid: the listeners place nodes on verse/chorus phrase boundaries, roughly every 6-15 seconds.
+    /// The window must stay well below the smallest gap: with a window as wide as the gaps, every re-trigger would
+    /// land inside a window, each one would defer a whole gap, and the stop would slide to the end of the track.
     /// </summary>
     public class PlaybackNodeScheduler
     {
@@ -101,16 +105,15 @@ namespace RainyLove
                     if (next >= EndNode) { _playToEnd = true; _stopNode = -1; }
                     else _stopNode = next;
                     _locked = true;
-                    return Fmt(elapsed) + " 条件再次满足（" + NodeLabel(from) + " 前 "
-                        + _windowSec.ToString("0") + " 秒内）→ 顺延到 "
-                        + (_playToEnd ? NodeLabel(EndNode) + "，放完整首" : NodeLabel(_stopNode) + " 结束播放");
+                    return Fmt(elapsed) + " 条件又成立（换段点 " + NodeLabel(from) + " 就在眼前）→ 这段不算唱完，改在 "
+                        + (_playToEnd ? NodeLabel(EndNode) + " 放完再停" : NodeLabel(_stopNode) + " 停");
                 }
 
                 if (!_locked)
                 {
                     string cancelled = NodeLabel(_stopNode);
                     _stopNode = -1;
-                    return Fmt(elapsed) + " 条件再次满足（离 " + cancelled + " 还远）→ 取消停止计划，继续播放";
+                    return Fmt(elapsed) + " 条件又成立（离换段点 " + cancelled + " 还早）→ 不停了，继续播";
                 }
                 return null;
             }
@@ -121,11 +124,11 @@ namespace RainyLove
             if (node >= EndNode)
             {
                 _playToEnd = true;
-                return Fmt(elapsed) + " 条件解除，已过最后一个节点 → 放完整首";
+                return Fmt(elapsed) + " 条件解除，后面没有换段点了 → 把这首放完";
             }
             _stopNode = node;
             _locked = false;
-            return Fmt(elapsed) + " 条件解除 → 顺延至 " + NodeLabel(node) + " 结束播放";
+            return Fmt(elapsed) + " 条件解除 → 先把当前这段唱完，在 " + NodeLabel(node) + " 停";
         }
 
         /// <summary>Called every frame (to avoid overshoot from the 0.25s scan).
@@ -139,13 +142,13 @@ namespace RainyLove
             if (_lastCondition)
             {
                 // Condition is met again exactly at the node: do not hard-stop, otherwise it would immediately replay from the start after reset.
-                message = "到达 " + NodeLabel(_stopNode) + " 时条件再次满足，取消本次停止，继续播放";
+                message = "刚到换段点 " + NodeLabel(_stopNode) + " 条件又成立 → 这次不停，继续播";
                 _stopNode = -1;
                 _locked = false;
                 return StopCancelled;
             }
 
-            message = "已在节点 " + NodeLabel(_stopNode) + "（" + Fmt(NodeTime(_stopNode)) + "）结束播放";
+            message = "到换段点 " + NodeLabel(_stopNode) + "，当前这段已经唱完 → 停止播放";
             return StopNow;
         }
 
@@ -154,6 +157,30 @@ namespace RainyLove
             if (seconds < 0f) seconds = 0f;
             int s = Mathf.FloorToInt(seconds);
             return (s / 60).ToString("00") + ":" + (s % 60).ToString("00");
+        }
+
+        /// <summary>mm:ss plus a tenth of a second only when there is one (00:43.5 / 01:38).</summary>
+        public static string FmtPrecise(float seconds)
+        {
+            if (seconds < 0f) seconds = 0f;
+            int whole = Mathf.FloorToInt(seconds);
+            // Plain cast instead of Mathf.RoundToInt: the seconds here are never negative, and it keeps the
+            // label builder usable from the stand-alone test harnesses, which stub only part of Mathf.
+            int tenth = (int)((seconds - whole) * 10f + 0.5f);
+            if (tenth >= 10) { whole++; tenth = 0; }
+            return Fmt(whole) + (tenth > 0 ? "." + tenth : string.Empty);
+        }
+
+        /// <summary>Builds the label array for a node time list: p2..pN for the checkpoints and 'pN+1 曲末'
+        /// for the end of track, matching the p1 = 00:00 (start) convention used in the logs.
+        /// Generated instead of hand-written so a node time and its label can never drift apart.</summary>
+        public static string[] BuildLabels(float[] checkpoints)
+        {
+            var labels = new string[checkpoints.Length + 1];
+            for (int i = 0; i < checkpoints.Length; i++)
+                labels[i] = "p" + (i + 2) + " " + FmtPrecise(checkpoints[i]);
+            labels[checkpoints.Length] = "p" + (checkpoints.Length + 2) + " 曲末";
+            return labels;
         }
     }
 }

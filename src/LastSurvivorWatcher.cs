@@ -14,17 +14,29 @@ namespace RainyLove
     ///
     /// Stop policy is switchable (ModConfig.DeferStop):
     ///   false (default) - stop the moment the condition ends (a revived teammate silences the track at once);
-    ///   true            - defer to a timeline node: p1 = 00:00 (start) / p2 = 01:27.1 / p3 = 02:10.07 / p4 = end of
-    ///                     track. Re-triggering within 10s before a node defers to the next node; re-triggering at p3
-    ///                     plays the whole track. This mode can play up to the full 219s, which is why it is off by default.
+    ///   true            - defer to the next node on the RainyLove timeline:
+    ///                     p2 01:27.1 / p3 02:10.07 / p4 end of track.
+    ///                     Re-triggering within NodeWindowSec before a node defers to the next node; re-triggering
+    ///                     in the window before the last node plays the whole track. This mode can play up to the
+    ///                     full 219s, which is why it is off by default.
+    ///
+    /// Boss hold (ModConfig.RainyLoveBossHold, off by default): while BossFightWatcher reports a living Miniboss/Boss,
+    /// nothing stops the track - not the survivor condition, not DeferStop, not the node schedule - and playback is
+    /// requested with device-level MCI 'repeat', so a track that reaches its end keeps sounding. When the fight ends
+    /// the normal stop policy takes over again. Like AIZO's hold it only extends: the song still starts only when
+    /// the last-survivor condition is met.
     /// </summary>
     public class LastSurvivorWatcher : MonoBehaviour
     {
         // ===== Timeline nodes (seconds): p2 01:27.1 / p3 02:10.07 / p4 end of track; 10s window =====
-        private readonly PlaybackNodeScheduler _sched = new PlaybackNodeScheduler(
-            new[] { 87.1f, 130.07f },
-            new[] { "p2 01:27.1", "p3 02:10.07", "p4 曲末" },
-            10f);
+        // Hand-picked, two nodes plus the end of the track. Kept deliberately sparse: a stop lands only on these
+        // points, so a chorus or any long section is never cut mid-phrase. The trade-off is a much longer delay -
+        // the condition can clear up to ~89s before the track actually stops.
+        private static readonly float[] NodeTimes = { 87.1f, 130.07f };
+        private const float NodeWindowSec = 10f;
+
+        private readonly PlaybackNodeScheduler _sched =
+            new PlaybackNodeScheduler(NodeTimes, PlaybackNodeScheduler.BuildLabels(NodeTimes), NodeWindowSec);
 
         private float _scanTimer;
         private bool _playedThisRun;
@@ -34,6 +46,8 @@ namespace RainyLove
         private bool _reloading;      // LoadClip coroutine in progress
         private bool _playAfterLoad;  // Start auto playback as soon as loading completes (audio was not ready when the condition triggered)
         private bool _manualAfterLoad;// Start manual test playback as soon as loading completes
+        private bool _holdLatch;      // A boss fight is the reason the music is on; keep it alive until the fight ends
+        private bool _holdLogged;     // Transition log guard for the boss hold
 
         // Multiplayer detection: once >=2 players have entered the dungeon, the run counts as multiplayer.
         private bool _multiplayerRoom;
@@ -61,6 +75,8 @@ namespace RainyLove
             _playedThisRun = false;
             _multiplayerRoom = false;
             _peakInDungeon = 0;
+            _holdLatch = false;
+            _holdLogged = false;
         }
 
         /// <summary>Whether audio is currently playing (shown as status in the config UI).</summary>
@@ -125,16 +141,26 @@ namespace RainyLove
                 {
                     _sched.Reset();
                     if (manual) AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _playPath, _playVolume);
-                    else if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume)) _playedThisRun = true;
+                    else if (AudioChannel.Instance != null
+                             && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume,
+                                                                ModConfig.RainyLoveBossHold && BossFightWatcher.Active))
+                        _playedThisRun = true;
                 }
             }
         }
 
         private void Update()
         {
+            // Keep the boss-fight detector warm for the whole session. AizoWatcher ticks it as well, but Tick
+            // throttles itself to one scan per 0.5s, so whichever watcher is enabled keeps it alive and having
+            // AIZO switched off can no longer freeze the detector that the RainyLove hold depends on.
+            BossFightWatcher.Tick();
+
             if (!ModConfig.Enabled)
             {
                 _sched.Reset();
+                _holdLatch = false;
+                _holdLogged = false;
                 AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);   // The master toggle stops auto playback only; manual test playback is unaffected
                 return;
             }
@@ -256,6 +282,40 @@ namespace RainyLove
             AudioChannel ch = AudioChannel.Instance;
             bool autoPlaying = ch != null && ch.IsPlaying(AudioSourceKey.RainyLove)
                                && !ch.IsManualPlaying(AudioSourceKey.RainyLove);
+
+            // ---- BOSS / mini-boss hold (ModConfig.RainyLoveBossHold) ----
+            // While a boss fight lasts RainyLove must not stop: the survivor condition, the defer switch and the
+            // node schedule are all irrelevant until it ends, and the device repeats the track so it never runs out.
+            // The latch records that this fight is what keeps the music on. A track that was already playing when
+            // the fight started cannot be turned into a looping one mid-flight (MCI cannot add 'repeat' to a running
+            // device), so it simply keeps playing to its end and the replay that follows is looping.
+            // Only extends, never starts: the last-survivor condition is still the only way in.
+            bool hold = ModConfig.RainyLoveBossHold && BossFightWatcher.Active;
+            if (hold)
+            {
+                if (autoPlaying) _holdLatch = true;
+                if (_holdLatch)
+                {
+                    _sched.Reset();
+                    if (!autoPlaying && AutoPlay())
+                        Log.Message("[rainylove] BOSS 战中续播（上一轮已播完）。");
+                    if (!_holdLogged)
+                    {
+                        _holdLogged = true;
+                        Log.Message("[rainylove] BOSS 战中 → 不停止播放"
+                                    + (ch != null && ch.IsLooping(AudioSourceKey.RainyLove) ? "（循环中，播完自动重播）" : "（下一轮起循环）")
+                                    + "。");
+                    }
+                    return;
+                }
+            }
+            else if (_holdLatch)
+            {
+                _holdLatch = false;
+                _holdLogged = false;
+                Log.Message("[rainylove] 已退出 BOSS 战保持 → 恢复常规停止逻辑。");
+            }
+
             if (!autoPlaying)
             {
                 _sched.Reset();
@@ -288,6 +348,10 @@ namespace RainyLove
         private void TickScheduledStop()
         {
             if (!_sched.HasPlan) return;
+
+            // A boss fight owns playback while the hold is engaged. The schedule is cleared on the next scan
+            // (0.25s), but a node falling inside that gap must not cut the track short.
+            if (_holdLatch) return;
 
             AudioChannel ch = AudioChannel.Instance;
             if (ch == null) return;
@@ -325,9 +389,12 @@ namespace RainyLove
             AudioChannel.Instance?.StartManual(AudioSourceKey.RainyLove, _playPath, _playVolume);
         }
 
-        /// <summary>Config UI 'Stop Playback'.</summary>
+        /// <summary>Config UI 'Stop Playback'. An explicit stop also cancels the boss-fight hold for this encounter,
+        /// otherwise the hold would immediately restart the track the user just silenced.</summary>
         public void StopFromUi()
         {
+            _holdLatch = false;
+            _holdLogged = false;
             if (AudioChannel.Instance != null && AudioChannel.Instance.IsPlaying(AudioSourceKey.RainyLove))
             {
                 _sched.Reset();
@@ -345,6 +412,8 @@ namespace RainyLove
         public void OnParamChanged()
         {
             _sched.Reset();
+            _holdLatch = false;         // the volume change stops playback, so the hold must not resurrect it
+            _holdLogged = false;
             AudioChannel.Instance?.StopAuto(AudioSourceKey.RainyLove);
             Log.Message("[rainylove] RainyLove 音量已更新，下次播放直接使用新音量。");
         }
@@ -362,7 +431,11 @@ namespace RainyLove
                 if (!_reloading) StartCoroutine(LoadClip());
                 return false;
             }
-            if (AudioChannel.Instance != null && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume))
+            // A fight already under way when the song starts: ask the device for 'repeat' right away, so the hold
+            // does not have to wait for the first run-through to end before it can keep the music alive.
+            bool loop = ModConfig.RainyLoveBossHold && BossFightWatcher.Active;
+            if (AudioChannel.Instance != null
+                && AudioChannel.Instance.StartAuto(AudioSourceKey.RainyLove, _playPath, _playVolume, loop))
             {
                 _sched.Reset();     // A new playback starts, so reset the node schedule
                 return true;
