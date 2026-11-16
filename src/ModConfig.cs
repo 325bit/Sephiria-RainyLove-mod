@@ -42,7 +42,7 @@ namespace RainyLove
 
         /// <summary>Keep RainyLove playing for the whole duration of a mini-boss / boss fight.
         /// true  = while a Miniboss/Boss is being fought, RainyLove never stops (a revived teammate no longer
-        ///         silences it, and neither DeferStop nor the node schedule may end it) and the track repeats
+        ///         silences it, and neither RainyLoveDeferStop nor the node schedule may end it) and the track repeats
         ///         when it reaches its end; once the fight is over the normal policy decides when it stops.
         /// false = the survivor condition alone decides when to stop (previous behaviour).
         /// Same contract as AizoBossHold, only for the other track. Off by default: music that refuses to stop
@@ -57,8 +57,8 @@ namespace RainyLove
         public static float AizoHealthValue = 30f;    // 0~9999 (fixed value)
 
         /// <summary>Keep AIZO playing for the whole duration of a mini-boss / boss fight.
-        /// true  = while a Miniboss/Boss is alive, AIZO never stops (regardless of health and of DeferStop) and the
-        ///         track repeats when it reaches its end; once the fight is over the normal DeferStop policy applies.
+        /// true  = while a Miniboss/Boss is alive, AIZO never stops (regardless of health and of AizoDeferStop) and the
+        ///         track repeats when it reaches its end; once the fight is over the normal AizoDeferStop policy applies.
         /// false = current behaviour (1.4.6): the health condition alone decides when to stop.
         /// Off by default: this deliberately makes the music refuse to stop, and a default-on behaviour reads to
         /// players as the 'music never stops' bug they already reported.</summary>
@@ -68,17 +68,27 @@ namespace RainyLove
         public static AudioPriority AudioPriority = AudioPriority.RainyLoveFirst;
         public static string MenuKey = "f7";
 
-        /// <summary>Stop policy shared by both sources.
-        /// true  = when the trigger condition ends, defer the stop to the next timeline node (p2/p3/...);
+        /// <summary>Per-track stop policy, each toggled from its own tab in the F7 panel.
+        /// true  = when that track's trigger condition ends, defer the stop to its next timeline node (p2/p3/...);
         /// false = stop the instant the condition ends (a revived teammate silences RainyLove at once, and health
         ///         recovering above the AIZO threshold silences AIZO at once).
-        /// Default false: the node deferral can legitimately keep playing for up to a whole track, which players
-        /// report as 'the music never stops', so the predictable behaviour is the default.
+        /// Default false for both: the node deferral can legitimately keep playing for up to a whole track, which
+        /// players report as 'the music never stops', so the predictable behaviour is the default.
         /// The in-game label is 顺延播放（播完当前这段主歌/副歌再停）-- worded after what the player hears
         /// (the current verse/chorus finishes, then it stops) rather than after the internal 'timeline node',
-        /// which nobody understood. The field name stays DeferStop because it is also the JSON key in
-        /// config.json; renaming it would silently reset every existing user's setting.</summary>
-        public static bool DeferStop = false;
+        /// which nobody understood.</summary>
+        public static bool RainyLoveDeferStop = false;
+        public static bool AizoDeferStop = false;
+
+        /// <summary>Legacy alias for the old single-switch config key. Reading means "both tracks defer"; writing
+        /// sets both tracks at once. New code must use RainyLoveDeferStop / AizoDeferStop directly.
+        /// The Settings DTO still serializes DeferStop so an existing config.json keeps its old key, and so an old
+        /// file containing only DeferStop can seed both new fields on load.</summary>
+        public static bool DeferStop
+        {
+            get { return RainyLoveDeferStop && AizoDeferStop; }
+            set { RainyLoveDeferStop = value; AizoDeferStop = value; }
+        }
 
         private static Settings _settings = new Settings();
 
@@ -185,7 +195,9 @@ namespace RainyLove
             AizoBossHold = _settings.AizoBossHold;
             AudioPriority = _settings.AudioPriority;
             MenuKey = _settings.MenuKey ?? "f7";
-            DeferStop = _settings.DeferStop;
+            // Old configs only have DeferStop; adopt it for both tracks when the new keys are absent.
+            RainyLoveDeferStop = _settings.RainyLoveDeferStop ?? _settings.DeferStop;
+            AizoDeferStop = _settings.AizoDeferStop ?? _settings.DeferStop;
         }
 
         private static void SyncToSettings()
@@ -203,8 +215,10 @@ namespace RainyLove
             _settings.AizoHealthValue = AizoHealthValue;
             _settings.AizoBossHold = AizoBossHold;
             _settings.AudioPriority = AudioPriority;
-            _settings.MenuKey = MenuKey;
-            _settings.DeferStop = DeferStop;
+            _settings.            MenuKey = MenuKey;
+            _settings.DeferStop = DeferStop;                 // legacy key, kept in sync for old readers
+            _settings.RainyLoveDeferStop = RainyLoveDeferStop;
+            _settings.AizoDeferStop = AizoDeferStop;
         }
 
         /// <summary>Resolve the absolute audio file path from config; baseName is "rainylove" / "AIZO" without an
@@ -264,7 +278,9 @@ namespace RainyLove
             public bool AizoBossHold = false;
             public AudioPriority AudioPriority = AudioPriority.RainyLoveFirst;
             public string MenuKey = "f7";
-            public bool DeferStop = false;
+            public bool DeferStop = false;           // legacy single switch, no longer read as the sole source
+            public bool? RainyLoveDeferStop = null;  // null = key absent -> inherit DeferStop
+            public bool? AizoDeferStop = null;       // null = key absent -> inherit DeferStop
         }
     }
 }

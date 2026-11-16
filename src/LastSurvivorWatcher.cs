@@ -12,7 +12,7 @@ namespace RainyLove
     /// This class only decides 'when to play'; playback and stopping are delegated to AudioChannel (which arbitrates RainyLove vs AIZO priority).
     /// The config UI 'Test Play / Stop Playback' also goes through AudioChannel, and manual playback is ended only by the stop button.
     ///
-    /// Stop policy is switchable (ModConfig.DeferStop):
+    /// Stop policy is switchable (ModConfig.RainyLoveDeferStop):
     ///   false (default) - stop the moment the condition ends (a revived teammate silences the track at once);
     ///   true            - defer to the next node on the RainyLove timeline:
     ///                     p2 01:27.1 / p3 02:10.07 / p4 end of track.
@@ -21,7 +21,7 @@ namespace RainyLove
     ///                     full 219s, which is why it is off by default.
     ///
     /// Boss hold (ModConfig.RainyLoveBossHold, off by default): while BossFightWatcher reports a living Miniboss/Boss,
-    /// nothing stops the track - not the survivor condition, not DeferStop, not the node schedule - and playback is
+    /// nothing stops the track - not the survivor condition, not RainyLoveDeferStop, not the node schedule - and playback is
     /// requested with device-level MCI 'repeat', so a track that reaches its end keeps sounding. When the fight ends
     /// the normal stop policy takes over again. Like AIZO's hold it only extends: the song still starts only when
     /// the last-survivor condition is met.
@@ -324,9 +324,9 @@ namespace RainyLove
                 return;
             }
 
-            // Immediate-stop mode (DeferStop off): a revived teammate silences the track on the next scan.
+            // Immediate-stop mode (RainyLoveDeferStop off): a revived teammate silences the track on the next scan.
             // No node plan is ever created, so nothing can keep the track running to its end.
-            if (!ModConfig.DeferStop)
+            if (!ModConfig.RainyLoveDeferStop)
             {
                 _sched.Reset();
                 if (!conditionMet)

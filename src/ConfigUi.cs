@@ -11,7 +11,7 @@ namespace RainyLove
     public class ConfigUi : MonoBehaviour
     {
         private const float WindowWidth = 620f;
-        private const float WindowHeight = 500f;
+        private const float WindowHeight = 560f;
         private const int WindowId = 918243;
 
         private static readonly Color UiBackground = new Color(0.035f, 0.043f, 0.063f, 1f);
@@ -30,6 +30,13 @@ namespace RainyLove
         private const string BossHoldOn = "已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播，直到当前BOSS战结束";
         private const string BossHoldOffRainyLove = "已关闭：只看存活人数决定何时停止";
         private const string BossHoldOffAizo = "已关闭：只看血量阈值决定何时停止";
+
+        // Deferred playback is now per-track: the same wording on both tabs, only the 'off' explanation
+        // names the trigger that ends the track on that tab.
+        private const string DeferLabel = "顺延播放（本段唱完再停）";
+        private const string DeferOn = "已开启：条件不再成立时，等这段主歌/副歌唱完才停";
+        private const string DeferOffRainyLove = "已关闭：队友复活、不再是最后一人时立刻静音";
+        private const string DeferOffAizo = "已关闭：血量回到阈值以上时立刻静音";
 
         private enum Tab { RainyLove, Aizo, Main }
         private Tab _tab = Tab.RainyLove;
@@ -229,19 +236,26 @@ namespace RainyLove
             GUI.Label(new Rect(24f, 220f, WindowWidth - 48f, 22f),
                 ModConfig.RainyLoveBossHold ? BossHoldOn : BossHoldOffRainyLove, _small);
 
-            Fill(new Rect(24f, 252f, WindowWidth - 48f, 1f), UiBorder);
+            // Deferred playback: RainyLove's own switch, independent of AIZO's.
+            GUI.Label(new Rect(24f, 250f, 400f, 32f), DeferLabel, _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 250f, 112f, 32f), ModConfig.RainyLoveDeferStop))
+                ModConfig.RainyLoveDeferStop = !ModConfig.RainyLoveDeferStop;
+            GUI.Label(new Rect(24f, 286f, WindowWidth - 48f, 22f),
+                ModConfig.RainyLoveDeferStop ? DeferOn : DeferOffRainyLove, _small);
+
+            Fill(new Rect(24f, 320f, WindowWidth - 48f, 1f), UiBorder);
 
             LastSurvivorWatcher rl = Entry.Watcher;
-            DrawStatus(266f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
+            DrawStatus(332f, rl != null && rl.IsAudioReady, rl != null && rl.IsPlaying, "RainyLove");
 
             bool rlOn = ModConfig.Enabled;
             bool rlDisabled = !rlOn;
             GUI.enabled = !rlDisabled;
-            if (Button(new Rect(24f, 306f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
-            if (Button(new Rect(186f, 306f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
+            if (Button(new Rect(24f, 372f, 150f, 36f), "▶  测试播放", false, UiOk) && rl != null) rl.TestPlay();
+            if (Button(new Rect(186f, 372f, 150f, 36f), "■  停止播放", false, UiDanger) && rl != null) rl.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 306f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 372f, 120f, 36f), "完成", true)) SetVisible(false);
 
         }
 
@@ -264,19 +278,26 @@ namespace RainyLove
             GUI.Label(new Rect(24f, 358f, WindowWidth - 48f, 22f),
                 ModConfig.AizoBossHold ? BossHoldOn : BossHoldOffAizo, _small);
 
-            Fill(new Rect(24f, 396f, WindowWidth - 48f, 1f), UiBorder);
+            // Deferred playback: AIZO's own switch, independent of RainyLove's.
+            GUI.Label(new Rect(24f, 390f, 400f, 32f), DeferLabel, _body);
+            if (Toggle(new Rect(WindowWidth - 136f, 390f, 112f, 32f), ModConfig.AizoDeferStop))
+                ModConfig.AizoDeferStop = !ModConfig.AizoDeferStop;
+            GUI.Label(new Rect(24f, 426f, WindowWidth - 48f, 22f),
+                ModConfig.AizoDeferStop ? DeferOn : DeferOffAizo, _small);
+
+            Fill(new Rect(24f, 460f, WindowWidth - 48f, 1f), UiBorder);
 
             AizoWatcher aizo = Entry.Aizo;
-            DrawStatus(404f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
+            DrawStatus(472f, aizo != null && aizo.IsAudioReady, aizo != null && aizo.IsPlaying, "AIZO");
 
             bool aizoOn = ModConfig.AizoEnabled;
             bool disabled = !aizoOn;
             GUI.enabled = !disabled;
-            if (Button(new Rect(24f, 442f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
-            if (Button(new Rect(186f, 442f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
+            if (Button(new Rect(24f, 508f, 150f, 36f), "▶  音频播放测试", false, UiOk) && aizo != null) aizo.TestPlay();
+            if (Button(new Rect(186f, 508f, 150f, 36f), "■  音频播放停止", false, UiDanger) && aizo != null) aizo.StopFromUi();
             GUI.enabled = true;
 
-            if (Button(new Rect(WindowWidth - 144f, 442f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 508f, 120f, 36f), "完成", true)) SetVisible(false);
         }
 
         // ---- Main Settings tab ----
@@ -288,27 +309,20 @@ namespace RainyLove
             GUI.Label(new Rect(24f, 172f, 400f, 32f), "启用 AIZO（血量过低播放）", _body);
             if (Toggle(new Rect(WindowWidth - 136f, 172f, 112f, 32f), ModConfig.AizoEnabled)) ModConfig.AizoEnabled = !ModConfig.AizoEnabled;
 
-            GUI.Label(new Rect(24f, 220f, 500f, 32f), "延迟停播", _body);
-            if (Toggle(new Rect(WindowWidth - 136f, 220f, 112f, 32f), ModConfig.DeferStop)) ModConfig.DeferStop = !ModConfig.DeferStop;
-            GUI.Label(new Rect(24f, 254f, WindowWidth - 48f, 22f),
-                ModConfig.DeferStop
-                    ? "已开启：条件不再成立时，不会当场掐断，等这段主歌/副歌唱完才停"
-                    : "已关闭：条件一不成立就立刻静音（救起队友 / 血量回到阈值以上）", _small);
+            Fill(new Rect(24f, 252f, WindowWidth - 48f, 1f), UiBorder);
 
-            Fill(new Rect(24f, 284f, WindowWidth - 48f, 1f), UiBorder);
-
-            GUI.Label(new Rect(24f, 300f, 500f, 26f), "音频播放优先级", _body);
-            PrioritySelector(332f);
+            GUI.Label(new Rect(24f, 268f, 500f, 26f), "音频播放优先级", _body);
+            PrioritySelector(300f);
 
             // Status: whether the two sources are playing
             bool rlPlaying = Entry.Watcher != null && Entry.Watcher.IsPlaying;
             bool aizoPlaying = Entry.Aizo != null && Entry.Aizo.IsPlaying;
-            GUI.Label(new Rect(24f, 384f, 320f, 24f),
+            GUI.Label(new Rect(24f, 358f, 320f, 24f),
                 "RainyLove：" + (rlPlaying ? "● 播放中" : "○ 未播放"), rlPlaying ? _okRight : _small);
-            GUI.Label(new Rect(24f, 410f, 320f, 24f),
+            GUI.Label(new Rect(24f, 384f, 320f, 24f),
                 "AIZO：" + (aizoPlaying ? "● 播放中" : "○ 未播放"), aizoPlaying ? _okRight : _small);
 
-            if (Button(new Rect(WindowWidth - 144f, 448f, 120f, 36f), "完成", true)) SetVisible(false);
+            if (Button(new Rect(WindowWidth - 144f, 430f, 120f, 36f), "完成", true)) SetVisible(false);
         }
 
         private void PrioritySelector(float y)

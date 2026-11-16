@@ -388,19 +388,21 @@ Consequences observed in multiplayer, both from the same one-line bug (`foreach 
 Do not "simplify" this back to `authority`. `LastSurvivorWatcher` used it as well, for the
 `OnlyWhenSelfIsLast` option: that option was permanently false on clients and permanently true on hosts.
 
-### 9.2 Stop policy is now a switch: `ModConfig.DeferStop`
+### 9.2 Stop policy is a switch, now one per track
 
-Both watchers share the flag (Main Settings tab, `顺延播放（到时间轴节点再停）`):
+Since 1.4.13 the two watchers no longer share a flag: `ModConfig.RainyLoveDeferStop` and
+`ModConfig.AizoDeferStop`, each toggled from its own tab of the F7 panel (`顺延播放（本段唱完再停）`).
 
 | | condition ends → behaviour | worst case |
 |---|---|---|
 | `false` (default) | hard stop on the next scan (≤ `ScanInterval`, 0.25 s) | track length as heard = time until the condition ended |
-| `true` | defer to the next timeline node (`PlaybackNodeScheduler`) | **the whole track** (219 s for RainyLove) |
+| `true` | defer to that track's next timeline node (`PlaybackNodeScheduler`) | **the whole track** (219 s for RainyLove) |
 
 The option is labelled 顺延播放, not 顺延停止: it is described by what it adds (a delayed playback tail) rather than by
 what it postpones, because 顺延停止 read as "delay the stop" and players could not tell whether the switch meant
-"stop later" or "do not stop". The C# field keeps the name `DeferStop` -- it doubles as the `config.json` key, and
-renaming it would silently reset the setting for every existing user.
+"stop later" or "do not stop". The old single switch remains as a JSON key and a legacy C# alias: an existing
+`config.json` containing only `DeferStop` seeds **both** per-track fields on load, so upgrading never resets a
+user's choice. Whenever the two new keys are present they win over the legacy key. See §18.
 
 The deferral behaviour is what players reported as "the music never stops", and it is reachable in three ways,
 all measured with the real scheduler in a frame-by-frame simulator:
@@ -413,7 +415,7 @@ all measured with the real scheduler in a frame-by-frame simulator:
 | re-trigger inside the p2 window, then ends again | 130.07 s |
 | re-trigger inside the p2 **and** p3 windows | end of track, 219.4 s |
 
-That is why `DeferStop` defaults to `false`. Turn it on only when the musical tail is wanted more than
+That is why both switches default to `false`. Turn one on only when the musical tail is wanted more than
 predictability.
 
 ### 9.3 `StartAuto` is idempotent for the already-playing source
@@ -556,9 +558,10 @@ behaviour) instead of losing the settings. `PackageRoot` is still needed either 
 `Asset/rainylove.mp3` / `Asset/AIZO.mp3` are located.
 
 Verified by `D:/tmp/cfgtest`, which compiles the unmodified `src/ModConfig.cs` against stubs for `Application` and
-`Log`, with the real `Newtonsoft.Json` from `Sephiria_Data/Managed`: 26 checks covering a fresh install, legacy
-migration (including that `DeferStop: true` survives), save/load round-trip, the fallback path, both-files-present
-precedence, and the literal target path above.
+`Log`, with the real `Newtonsoft.Json` from `Sephiria_Data/Managed`: 37 checks covering a fresh install, legacy
+migration (including that `DeferStop: true` survives and seeds both per-track switches), the two switches round-
+tripping independently, per-track keys overriding the legacy key, the fallback path, both-files-present precedence,
+and the literal target path above.
 
 ---
 
@@ -566,8 +569,9 @@ precedence, and the literal target path above.
 
 New AIZO option `ModConfig.AizoBossHold` (panel label 「BOSS 战期间保持播放（战后按顺延设置停止）」, **off by default**).
 While a Miniboss or Boss is alive, AIZO must not stop for any reason, and a track that reaches its end repeats;
-once the fight is over the existing `DeferStop` policy applies again (immediate stop, or defer to the next timeline
-node). Starting still needs the health trigger — the hold only extends playback, it never forces a start.
+once the fight is over AIZO's own `DeferStop` policy applies again (immediate stop, or defer to the next timeline
+node — now `ModConfig.AizoDeferStop`). Starting still needs the health trigger — the hold only extends playback, it
+never forces a start.
 
 ### 13.1 Why the detector does not use `BossSpawner.IsBossBattleInProgress`
 
@@ -825,9 +829,9 @@ folder, where `rainylove.wav` / `AIZO.wav` used to shadow the MP3. Those files c
 The contract is the one from §13, applied to the other track:
 
 - While `BossFightWatcher` reports a fight, **no stop path is reachable** — the last-survivor condition,
-  `DeferStop` and the node schedule are all ignored — and the track is requested with device-level MCI `repeat`,
-  so reaching its end does not silence it.
-- When the fight ends the normal policy takes over: immediate stop with `DeferStop` off, or "finish this
+  `RainyLoveDeferStop` and the node schedule are all ignored — and the track is requested with device-level MCI
+  `repeat`, so reaching its end does not silence it.
+- When the fight ends the normal policy takes over: immediate stop with `RainyLoveDeferStop` off, or "finish this
   verse/chorus" with it on. Only extends, never starts: RainyLove still begins solely on the last-survivor
   trigger, so turning the hold on cannot make the song play in single player.
 
@@ -835,8 +839,8 @@ The contract is the one from §13, applied to the other track:
 
 - `_holdLatch` / `_holdLogged`, cleared in `ResetRunState`, `StopFromUi` and `OnParamChanged` — the same
   "the user silenced it, do not resurrect it" rule as AIZO.
-- The hold block sits at the top of `ScanCondition`, before the `DeferStop` branch, so it short-circuits both the
-  immediate-stop and the node-deferral paths. `TickScheduledStop` bails out while `_holdLatch` is set: the plan is
+- The hold block sits at the top of `ScanCondition`, before the `RainyLoveDeferStop` branch, so it short-circuits
+  both the immediate-stop and the node-deferral paths. `TickScheduledStop` bails out while `_holdLatch` is set: the plan is
   cleared on the next 0.25s scan, but a node landing inside that gap must not cut the track.
 - `AutoPlay()` passes `loop = RainyLoveBossHold && BossFightWatcher.Active`, including the `_playAfterLoad` path.
   A run-through that was already playing when the fight started stays non-looping until it ends (MCI cannot add
@@ -854,9 +858,9 @@ The contract is the one from §13, applied to the other track:
 `D:/tmp/rlworld` grew from 43 to 68 checks with a ⑤ group driven through the real watcher and the real
 `AudioChannel`: a start before the fight does not request `repeat`; a revived teammate no longer silences the
 song while a boss is engaged; the non-looping run-through resets at the track end and the hold replays it with
-`repeat`; the fight ending releases the latch and (with `DeferStop` off) stops immediately; the hold alone never
+`repeat`; the fight ending releases the latch and (with `RainyLoveDeferStop` off) stops immediately; the hold alone never
 starts playback; `StopFromUi` is not undone by the hold; `ResetRunState` clears the latch. All six harnesses
-green: gtest 21 / rlworld 68 / bossfight 69 / aizohold 44 / aloader 20 / cfgtest 30.
+green: gtest 21 / rlworld 68 / bossfight 69 / aizohold 44 / aloader 20 / cfgtest 37 (259 checks total).
 
 ### 17.3 Panel wording
 
@@ -865,3 +869,35 @@ on 「已开启：小BOSS/BOSS 存活期间不再停止，播完自动重播，�
 「已关闭：只看存活人数决定何时停止」 (AIZO keeps 「已关闭：只看血量阈值决定何时停止」).
 The label and the 'already on' line are shared constants in `ConfigUi.cs`; only the 'off' line names the trigger
 that still decides on its own.
+
+---
+
+## 18. Addendum (1.4.13): deferred playback is per track
+
+The old single 延迟停播 toggle in Main Settings is gone. Each track now owns its own switch, placed on its own
+F7 tab next to the boss-hold switch:
+
+| tab | field / JSON key | reader | panel 'off' explanation |
+|---|---|---|---|
+| RainyLove | `RainyLoveDeferStop` | `LastSurvivorWatcher.ScanCondition` | 队友复活、不再是最后一人时立刻静音 |
+| AIZO | `AizoDeferStop` | `AizoWatcher.ScanCondition` | 血量回到阈值以上时立刻静音 |
+
+Both default to `false`. The label 顺延播放（本段唱完再停） and the 'on' explanation are shared constants;
+only the 'off' line is track-specific. The Main Settings tab now carries a one-line pointer to the two tabs.
+Window height grew from 500 to 560 to fit the extra row on the AIZO tab.
+
+The `config.json` DTO keeps `DeferStop` as a legacy key and adds two **nullable** keys:
+`RainyLoveDeferStop` / `AizoDeferStop`. On load, `SyncFromSettings` uses
+`_settings.RainyLoveDeferStop ?? _settings.DeferStop` (and the AIZO equivalent), so:
+
+- an old file with only `DeferStop: true` enables deferral for **both** tracks;
+- a file with both new keys present uses them and ignores the legacy key;
+- a fresh install writes all three keys, so old readers still see a well-formed boolean.
+
+`ModConfig.DeferStop` survives as a compatibility alias — reading it means "both defer" (`&&`), writing it sets
+both. No runtime code uses the alias any more; the watchers read only their own field. This keeps older harnesses
+that poke `ModConfig.DeferStop` meaningful without letting one track silently control the other.
+
+Verification: `D:/tmp/cfgtest` grew from 30 to 37 checks (independent round-trip, legacy seeding, new-key
+precedence); `aizohold` and `rlworld` stubs were given the matching per-track fields while still compiling the
+real watcher sources. All six harnesses green (259 checks), and `rainylove.csproj` builds with 0 warnings.

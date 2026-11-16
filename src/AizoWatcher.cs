@@ -11,7 +11,7 @@ namespace RainyLove
     /// A threshold of 0 disables that condition (it can never be met).
     /// Playback still goes through AudioChannel arbitration; the config UI 'Audio Playback Test / Stop' uses the manual channel.
     ///
-    /// Stop policy is switchable (ModConfig.DeferStop):
+    /// Stop policy is switchable (ModConfig.AizoDeferStop):
     ///   false (default) - stop the moment health is back above both thresholds;
     ///   true            - defer to the next node on the AIZO timeline:
     ///                     p2 00:43.5 / p3 01:38 / p4 02:20 / p5 end of track.
@@ -23,9 +23,9 @@ namespace RainyLove
     /// The resolved MemberInfo is cached and logged so the correct field can be verified.
     ///
     /// Boss hold (ModConfig.AizoBossHold, off by default): while BossFightWatcher reports a living Miniboss/Boss,
-    /// nothing stops the track - not the health condition, not DeferStop, not the node schedule - and playback is
+    /// nothing stops the track - not the health condition, not AizoDeferStop, not the node schedule - and playback is
     /// started with device-level MCI 'repeat' so a finished track keeps sounding. When the fight ends the normal
-    /// DeferStop policy takes over again. Starting still requires the health trigger: the hold only extends, it
+    /// AizoDeferStop policy takes over again. Starting still requires the health trigger: the hold only extends, it
     /// never forces a start.
     /// </summary>
     public class AizoWatcher : MonoBehaviour
@@ -285,9 +285,9 @@ namespace RainyLove
                 return;
             }
 
-            // Immediate-stop mode (DeferStop off): health back above both thresholds silences AIZO on the next scan.
+            // Immediate-stop mode (AizoDeferStop off): health back above both thresholds silences AIZO on the next scan.
             // No node plan is created, so nothing can keep the track running to its end.
-            if (!ModConfig.DeferStop)
+            if (!ModConfig.AizoDeferStop)
             {
                 _sched.Reset();
                 if (!low)
